@@ -1,5 +1,5 @@
 """ utility functions for reading the Hitachi supply chain
-data, and aggregating quantities (e.g. weight, price)
+index data, and aggregating quantities (e.g. weight, price)
 """
 
 import csv
@@ -17,10 +17,8 @@ def parse_date(date_str: str) -> tuple[int]:
     return int(year), int(month), int(day)
 
 def is_leap_year(year: int) -> bool:
-    if (year % 4 != 0):
+    if (year % 4 != 0 or (year % 100 == 0 and year % 400 != 0)):
         return False 
-    elif (year % 100 == 0 and year % 400 != 0):
-        return False
     return True
 
 def get_transaction_years(start_date: str, end_date: str) -> dict:
@@ -47,8 +45,12 @@ def get_transaction_years(start_date: str, end_date: str) -> dict:
     
     return year_weights
     
-def aggregate_sc_products():
-    
+def aggregate_sc_products(hs_level = 6):
+    """
+    [TODO] documentation
+            hs_level (int): the number of HS digits we use to represent products 
+                        i.e. level of product granularity. Should be in [2,4,6].
+    """
     hitachi_data_path = "s3://supply-web-data-storage/CSV/index_hs6.csv"
     df = pd.read_csv(hitachi_data_path)
     n = len(df)
@@ -67,7 +69,7 @@ def aggregate_sc_products():
     for i in tqdm(range(n)):
         hs6_product, start_date, end_date, weight, currency = hs6_products[i], start_dates[i], end_dates[i], weight_list[i], currency_list[i]
         try:
-            hs6_product = int(hs6_product)
+            hs6_product = int(hs6_product) // 10 ** (6 - hs_level)
         except: 
             continue 
 

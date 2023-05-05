@@ -51,12 +51,14 @@ def read_product_codes(csv_file = "../data/BACI/product_codes_HS17_V202301.csv")
             
     return code2product
 
-def aggregate_global_products(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.csv"):
+def aggregate_global_products(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.csv", hs_level = 6):
     """
     reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
     
     Args:
         csv_file (str): path to a yearly BACI trade file
+        hs_level (int): the number of HS digits we use to represent products 
+                        i.e. level of product granularity. Should be in [2,4,6].
         
     Returns:
          dict: an econometrics dictionary from HS6 product code to the aggregated 
@@ -65,9 +67,7 @@ def aggregate_global_products(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.c
     """
     df = pd.read_csv(csv_file)
     n = len(df)
-    product_list = list(df["k"])
-    cash_list = list(df["v"])
-    weight_list = list(df["q"])
+    product_list, cash_list, weight_list = list(df["k"]), list(df["v"]), list(df["q"])
     
     econometrics_dict = {}
     print("#### Aggregating the Global Trade Data #####")
@@ -78,6 +78,8 @@ def aggregate_global_products(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.c
         currency = float(currency) * 1000 
         #in metric tons
         weight = float(weight) if "NA" not in weight else 0
+        #whether we consider 2-digit, 4-digit, or full 6-digit HS codes
+        product = product // 10**(6 - hs_level)
         
         if (product in econometrics_dict):
             econometrics_dict[product]["currency"] += currency
@@ -87,13 +89,20 @@ def aggregate_global_products(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.c
             
     return econometrics_dict
     
-def aggregate_countries():
+def aggregate_countries(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.csv"):
     """
     [TODO] implement this function to collect trading flow data between country pairs, aggregating over all exchanged products
     """
+    df = pd.read_csv(csv_file)
+    n = len(df)
+    product_list, cash_list, weight_list = list(df["k"]), list(df["v"]), list(df["q"])
+    country_i_list, country_j_list = list(df["i"]), list(df["j"]) 
+
+    
+def aggregate_countries_and_products():
     pass
 
-def get_BACI_data(data_dir = "/home/jamin/supply-chains/data/BACI", year = 2020):
+def get_BACI_data(data_dir = "/home/jamin/supply-chains/data/BACI", year = 2020, hs_level = 6):
     """
     reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
     
@@ -116,7 +125,7 @@ def get_BACI_data(data_dir = "/home/jamin/supply-chains/data/BACI", year = 2020)
           
     country_map = read_country_codes(country_codes_file)
     product_map = read_product_codes(product_codes_file)
-    trading_map = aggregate_global_products(trade_data_file)
+    trading_map = aggregate_global_products(trade_data_file, hs_level = hs_level)
     
     return country_map, product_map, trading_map
     
