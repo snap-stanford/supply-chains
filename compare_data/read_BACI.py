@@ -12,7 +12,7 @@ import pandas as pd
 import argparse
 import numpy as np
 
-def read_country_codes(csv_file = "../data/BACI/country_codes_V202301.csv"):
+def read_country_codes(csv_file = "./data/BACI/country_codes_V202301.csv"):
     """
     reads file on BACI country codes, mapping them to globally standardised ISO country codes
     
@@ -32,7 +32,7 @@ def read_country_codes(csv_file = "../data/BACI/country_codes_V202301.csv"):
         
     return code2country
 
-def read_product_codes(csv_file = "../data/BACI/product_codes_HS17_V202301.csv"):
+def read_product_codes(csv_file = "./data/BACI/product_codes_HS17_V202301.csv"):
     """
     reads BACI file on product codes, mapping each HS6 code to its specific description
     
@@ -78,7 +78,7 @@ def get_entity_constructor(aggregation_type):
         return lambda exporter, importer, product: (exporter, importer, product)
     raise ValueError("invalid aggregation type")
 
-def aggregate(csv_file =  "../data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation_type = "product", hs_level = 6):
+def aggregate(csv_file =  "./data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation_type = "product", hs_level = 6):
     """
     reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
     
@@ -125,7 +125,7 @@ def aggregate(csv_file =  "../data/BACI/BACI_HS17_Y2018_V202301.csv", aggregatio
              
     return econometrics_dict
 
-def get_BACI_data(data_dir = "/home/jamin/supply-chains/data/BACI", aggregation_type = "product", year = 2020, hs_level = 6):
+def get_BACI_data(data_dir = "./data/BACI", aggregation_type = "product", year = 2020, hs_level = 6):
     """
     reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
     

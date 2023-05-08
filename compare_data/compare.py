@@ -8,6 +8,7 @@ import numpy as np
 import scipy
 import sys
 from tqdm import tqdm
+import argparse
 
 def plot_differences(currency_points, weight_points, year, fname = "trade_combined.jpg", hs_level = 6):
     marker_size = {2: 10, 4: 1, 6: 0.2}[hs_level]
@@ -96,8 +97,14 @@ def run_stats_testing(currency_points, weight_points, year):
     
 if __name__ == "__main__":
     
-    year = int(sys.argv[1])
-    hs_level = int(sys.argv[2])
+    parser = argparse.ArgumentParser(description='Parse directory paths for data downloading.')
+    parser.add_argument('--year', nargs='?', help='Year of data comparison', default = 2020)
+    parser.add_argument('--hs_digits', nargs='?', help='Number of HS digits to group products by', default = 6)
+    args = parser.parse_args()
+    
+    year = args.year
+    hs_level = args.hs_digits
+    
     supply_chain_data = read_Hitachi.aggregate_sc_products(hs_level = hs_level, use_redshift = True)[year]
     country_map, product_map, globalised_data = read_BACI.get_BACI_data(year = year, hs_level = hs_level)
     

@@ -22,10 +22,10 @@ def is_leap_year(year: int) -> bool:
         return False 
     return True
 
-def get_hitachi_products():
+def get_hitachi_products(csv_file):
     pass
 
-def get_hitachi_countries():
+def get_hitachi_countries(csv_file):
     pass
 
 def get_transaction_years(start_date: str, end_date: str) -> dict:
@@ -52,18 +52,13 @@ def get_transaction_years(start_date: str, end_date: str) -> dict:
     
     return year_weights 
     
-def aggregate_sc_products(hs_level = 6, use_redshift = False):
+def aggregate_sc_products(csv_file = "./data/Hitachi/index_hs6.csv", hs_level = 6):
     """
     [TODO] documentation
             hs_level (int): the number of HS digits we use to represent products 
                         i.e. level of product granularity. Should be in [2,4,6].
     """
-    if (use_redshift):
-        #make sure to download the most recent RedShift index via querying
-        hitachi_data_path = "../data/redshift_index_hs6.csv"
-    else:
-        hitachi_data_path = "s3://supply-web-data-storage/CSV/index_hs6.csv"
-    df = pd.read_csv(hitachi_data_path)
+    df = pd.read_csv(csv_file)
     n = len(df)
     
     hs6_products = list(df["hs6"])
@@ -97,9 +92,11 @@ def aggregate_sc_products(hs_level = 6, use_redshift = False):
     
     return supply_chain_dict
     
+def get_Hitachi_data(data_dir = "./data/BACI", aggregation_type = "product", hs_level = 6):
+    pass
     
 if __name__ == "__main__":
-    supply_chain_dict = aggregate_sc_products(use_redshift = True)[2020]
+    supply_chain_dict = aggregate_sc_products(hs_level = 6)[2020]
     keys = list(supply_chain_dict.keys())
     print(f"Number of Unique Products in Hitachi SC Data: {len(keys)}")
     sampled_keys = np.random.choice(keys, size = 50, replace = False)
