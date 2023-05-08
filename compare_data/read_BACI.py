@@ -10,6 +10,7 @@ import sys
 from tqdm import tqdm
 import pandas as pd
 import argparse
+import numpy as np
 
 def read_country_codes(csv_file = "../data/BACI/country_codes_V202301.csv"):
     """
@@ -51,29 +52,63 @@ def read_product_codes(csv_file = "../data/BACI/product_codes_HS17_V202301.csv")
             
     return code2product
 
-def aggregate_global_products(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.csv", hs_level = 6):
+#def get_combined_entity(exporter, importer, product, aggregation_type):
+#    entity_map = {"exporter": exporter, "importer": importer, "product": product}
+#    entities = [entity.strip() for entity in aggregation_type.split("_")]
+#    if len(entities) == 1: return entity_map[entities[0]]
+#    return (entity_map[entity] for entity in entities)
+
+def get_entity_constructor(aggregation_type):
+    """
+    note: wanted to implement this with prettier code, but this optimises performance noticeably 
+    """
+    if (aggregation_type == "exporter"):
+        return lambda exporter, importer, product: exporter
+    if (aggregation_type == "importer"):
+        return lambda exporter, importer, product: importer
+    if (aggregation_type == "product"):
+        return lambda exporter, importer, product: product
+    if (aggregation_type == "exporter_importer"):
+        return lambda exporter, importer, product: (exporter, product)
+    if (aggregation_type == "exporter_product"):
+        return lambda exporter, importer, product: (exporter, product)
+    if (aggregation_type == "importer_product"):
+        return lambda exporter, importer, product: (importer, product)
+    if (aggregation_type == "exporter_importer_product"):
+        return lambda exporter, importer, product: (exporter, importer, product)
+    raise ValueError("invalid aggregation type")
+
+def aggregate(csv_file =  "../data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation_type = "product", hs_level = 6):
     """
     reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
     
     Args:
         csv_file (str): path to a yearly BACI trade file
+        aggregation_type (str): specifies the entity combinations for which we calculate trade flows.
+                                Should take the form [entity1]_[entity2]_ ..., where each entity is among 
+                               ["exporter","importer","product"] and ordered as such (e.g. no product_importer)
+                                
         hs_level (int): the number of HS digits we use to represent products 
                         i.e. level of product granularity. Should be in [2,4,6].
         
     Returns:
-         dict: an econometrics dictionary from HS6 product code to the aggregated 
-               currency flow (in current US dollars) and weight (in metric tonnes) in global trade
+         dict: an econometrics dictionary from entities (e.g. country, product; see aggregation_type) to
+                 aggregated currency flow (in current US dollars) and weight (in metric tonnes) in global trade
              
     """
     df = pd.read_csv(csv_file)
     n = len(df)
     product_list, cash_list, weight_list = list(df["k"]), list(df["v"]), list(df["q"])
+    exporter_list, importer_list = list(df["i"]), list(df["j"]) 
+    entities_to_extract = aggregation_type.strip().split("_")
     
     econometrics_dict = {}
-    print("#### Aggregating the Global Trade Data #####")
+
+    entity_extractor = get_entity_constructor(aggregation_type)
     for i in tqdm(range(n)):
         product, currency, weight = product_list[i], cash_list[i], weight_list[i]
-        
+        exporter, importer = exporter_list[i], importer_list[i]
+    
         #in current USD dollars
         currency = float(currency) * 1000 
         #in metric tons
@@ -81,35 +116,24 @@ def aggregate_global_products(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.c
         #whether we consider 2-digit, 4-digit, or full 6-digit HS codes
         product = product // 10**(6 - hs_level)
         
-        if (product in econometrics_dict):
-            econometrics_dict[product]["currency"] += currency
-            econometrics_dict[product]["weight"] += weight
+        hybrid_entity = entity_extractor(exporter, importer, product)
+        if hybrid_entity in econometrics_dict:
+            econometrics_dict[hybrid_entity]["currency"] += currency
+            econometrics_dict[hybrid_entity]["weight"] += weight
         else:
-            econometrics_dict[product] = {"currency": currency, "weight": weight}
-            
+            econometrics_dict[hybrid_entity] = {"currency": currency, "weight": weight}
+             
     return econometrics_dict
-    
-def aggregate_countries(csv_file = "../data/BACI/BACI_HS17_Y2018_V202301.csv"):
-    """
-    [TODO] implement this function to collect trading flow data between country pairs, aggregating over all exchanged products
-    """
-    df = pd.read_csv(csv_file)
-    n = len(df)
-    product_list, cash_list, weight_list = list(df["k"]), list(df["v"]), list(df["q"])
-    country_i_list, country_j_list = list(df["i"]), list(df["j"]) 
 
-    
-def aggregate_countries_and_products():
-    pass
-
-def get_BACI_data(data_dir = "/home/jamin/supply-chains/data/BACI", year = 2020, hs_level = 6):
+def get_BACI_data(data_dir = "/home/jamin/supply-chains/data/BACI", aggregation_type = "product", year = 2020, hs_level = 6):
     """
     reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
     
     Args:
         data_dir (str): path--preferably absolute--to the directory storing the BACI data
         year (int): the year to extract bilateral trade data from (2017 - 2021, inclusive)
-        
+        aggregation_type (str): species the entity combinations for which we calculate trade flows (see aggregate)
+                        
     Returns:
          tuple[dict]: Three dictionaries. (1) from internal county codes used in dataset to 
                      globally standardised ISO codes, (2) from product HS6 codes to
@@ -125,33 +149,21 @@ def get_BACI_data(data_dir = "/home/jamin/supply-chains/data/BACI", year = 2020,
           
     country_map = read_country_codes(country_codes_file)
     product_map = read_product_codes(product_codes_file)
-    trading_map = aggregate_global_products(trade_data_file, hs_level = hs_level)
+    trading_map = aggregate(trade_data_file, aggregation_type, hs_level)
     
     return country_map, product_map, trading_map
     
 if __name__ == "__main__":
     
-    country_map, product_map, trading_map = get_BACI_data("/home/jamin/supply-chains/data/BACI", year = 2020)
-    for good in [860799, 853521, 382499, 853649, 853890]:
-        print(good, trading_map[good])
-    
-    """
-    basic testing 
-    
-    code2country = read_country_codes()
-    code2product = read_product_codes()
-    
-    for code in list(code2country.keys())[:5]:
-        print(code, code2country[code])
-    print()
-    for code in list(code2product.keys())[:5]:
-        print(code, code2product[code])
-    
-    trade_data_dict = aggregate_global_products()
-    products_hs6 = list(trade_data_dict.keys())
-    for hs6_code in products_hs6[:5]:
-        print(code2product[hs6_code], trade_data_dict[hs6_code])
-    """
+    aggregation_type = "exporter_importer_product" if (len(sys.argv) == 1) else sys.argv[1]
+    entities = aggregation_type.strip().split("_")
+    country_map, product_map, trading_map = get_BACI_data("/home/jamin/supply-chains/data/BACI", 
+                                                          aggregation_type = aggregation_type, year = 2020, hs_level = 6)
+    keys = list(trading_map.keys())
+    print(f"Number of Unique Keys under Entity Combination {aggregation_type}: {len(keys)}")
+    for i in np.random.choice(range(len(trading_map)), size = 100, replace = False):
+        key_name = tuple(product_map[entity] if entities[idx] == "product" else country_map[entity]["name"] for idx, entity in enumerate(keys[i]))
+        print(key_name, trading_map[keys[i]])
     
     
     

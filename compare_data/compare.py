@@ -98,10 +98,9 @@ if __name__ == "__main__":
     
     year = int(sys.argv[1])
     hs_level = int(sys.argv[2])
-    supply_chain_data = read_Hitachi.aggregate_sc_products(hs_level = hs_level)[year]
+    supply_chain_data = read_Hitachi.aggregate_sc_products(hs_level = hs_level, use_redshift = True)[year]
     country_map, product_map, globalised_data = read_BACI.get_BACI_data(year = year, hs_level = hs_level)
     
-   
     common_products = set(supply_chain_data.keys()).intersection(set(globalised_data.keys()))
     
     currency_points = []
