@@ -105,6 +105,7 @@ def aggregate(csv_file =  "./data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation
     econometrics_dict = {}
 
     entity_extractor = get_entity_constructor(aggregation_type, country_map)
+    print(f"#### Aggregating Baci Data for HS{hs_level} at HS{hs_level} Entity Level {aggregation_type} ####")
     for i in tqdm(range(n)):
         product, currency, weight = product_list[i], cash_list[i], weight_list[i]
         exporter, importer = exporter_list[i], importer_list[i]
