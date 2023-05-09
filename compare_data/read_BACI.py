@@ -58,27 +58,27 @@ def read_product_codes(csv_file = "./data/BACI/product_codes_HS17_V202301.csv"):
 #    if len(entities) == 1: return entity_map[entities[0]]
 #    return (entity_map[entity] for entity in entities)
 
-def get_entity_constructor(aggregation_type):
+def get_entity_constructor(aggregation_type, country_map):
     """
     note: wanted to implement this with prettier code, but this optimises performance noticeably 
     """
     if (aggregation_type == "exporter"):
-        return lambda exporter, importer, product: exporter
+        return lambda exporter, importer, product: country_map[exporter]["iso_alpha3"]
     if (aggregation_type == "importer"):
-        return lambda exporter, importer, product: importer
+        return lambda exporter, importer, product: country_map[importer]["iso_alpha3"]
     if (aggregation_type == "product"):
         return lambda exporter, importer, product: product
     if (aggregation_type == "exporter_importer"):
-        return lambda exporter, importer, product: (exporter, product)
+        return lambda exporter, importer, product: (country_map[exporter]["iso_alpha3"], country_map[importer]["iso_alpha3"])
     if (aggregation_type == "exporter_product"):
-        return lambda exporter, importer, product: (exporter, product)
+        return lambda exporter, importer, product: (country_map[exporter]["iso_alpha3"], product)
     if (aggregation_type == "importer_product"):
-        return lambda exporter, importer, product: (importer, product)
+        return lambda exporter, importer, product: (country_map[importer]["iso_alpha3"], product)
     if (aggregation_type == "exporter_importer_product"):
-        return lambda exporter, importer, product: (exporter, importer, product)
+        return lambda exporter, importer, product: (country_map[exporter]["iso_alpha3"], country_map[importer]["iso_alpha3"], product)
     raise ValueError("invalid aggregation type")
 
-def aggregate(csv_file =  "./data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation_type = "product", hs_level = 6):
+def aggregate(csv_file =  "./data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation_type = "product", hs_level = 6, country_map = {}):
     """
     reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
     
@@ -104,7 +104,7 @@ def aggregate(csv_file =  "./data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation
     
     econometrics_dict = {}
 
-    entity_extractor = get_entity_constructor(aggregation_type)
+    entity_extractor = get_entity_constructor(aggregation_type, country_map)
     for i in tqdm(range(n)):
         product, currency, weight = product_list[i], cash_list[i], weight_list[i]
         exporter, importer = exporter_list[i], importer_list[i]
@@ -149,7 +149,7 @@ def get_BACI_data(data_dir = "./data/BACI", aggregation_type = "product", year =
           
     country_map = read_country_codes(country_codes_file)
     product_map = read_product_codes(product_codes_file)
-    trading_map = aggregate(trade_data_file, aggregation_type, hs_level)
+    trading_map = aggregate(trade_data_file, aggregation_type, hs_level, country_map)
     
     return country_map, product_map, trading_map
     
@@ -161,8 +161,8 @@ if __name__ == "__main__":
                                                           aggregation_type = aggregation_type, year = 2020, hs_level = 6)
     keys = list(trading_map.keys())
     print(f"Number of Unique Keys under Entity Combination {aggregation_type}: {len(keys)}")
-    for i in np.random.choice(range(len(trading_map)), size = 100, replace = False):
-        key_name = tuple(product_map[entity] if entities[idx] == "product" else country_map[entity]["name"] for idx, entity in enumerate(keys[i]))
+    for i in np.random.choice(range(len(trading_map)), size = 20, replace = False):
+        key_name = tuple(product_map[entity] if entities[idx] == "product" else entity for idx, entity in enumerate(keys[i]))
         print(key_name, trading_map[keys[i]])
     
     
