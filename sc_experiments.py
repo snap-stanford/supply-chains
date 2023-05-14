@@ -218,20 +218,3 @@ def compare_orderings_across_k(orderings, labels, title=''):
         ymin, ymax = ax.get_ylim()
         ax.set_ylim(0, ymax)
     plt.show()
-    
-    
-def parse_battery_bom():
-    """
-    Parse battery_bom.txt to return dictionary.
-    """
-    fn = './battery_bom.txt'
-    with open(fn, 'r') as f:
-        content = f.readlines()
-    bom = {}
-    for l in content:
-        if ' - ' in l:
-            part, codes = l.split(' - ')
-            codes = codes.split('[', 1)[1]
-            codes = codes.rsplit(']', 1)[0]
-            bom[part] = codes.replace('\'', '').split(',')
-    return bom
