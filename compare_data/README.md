@@ -16,6 +16,7 @@ to obtain both the most recent Hitachi and BACI data, saved to folders `data/Hit
 ## Command Line Usage
 To compare the data in the year 2019 at the HS 6-digit product level, run
 ```zsh
+mkdir images #create a directory to store plots
 python compare.py --year 2019 --hs_digits 6
 ```
 Dataset comparisons are available for years 2019, 2020, 2021, and the recommended HS digit levels are 2,4, and 6 (for ease of product interpretability).

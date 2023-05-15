@@ -9,29 +9,48 @@ import scipy
 import sys
 import json 
 from tqdm import tqdm
+import plotly.express as px
+import pandas as pd
 
 if __name__ == "__main__":
     
     #year = int(sys.argv[1])
     hs_level = int(sys.argv[1])
-    agg_type = sys.argv[2]
+    agg_type = sys.argv[2].strip()
     
-    supply_chain_data_table = read_Hitachi.aggregate_sc(hs_level = hs_level, aggregation_type = agg_type)
+    country_map, product_map, trading_map = read_Hitachi.get_Hitachi_data(hs_level = hs_level, aggregation_type = agg_type)
+    year = 2021
     
-    baci_products = set()
-    hitachi_products = set()
-    for year in [2019, 2020, 2021]:
-        #country_map, product_map, globalised_data = read_BACI.get_BACI_data(year = year, hs_level = hs_level, aggregation_type = agg_type)
-        supply_chain_data = supply_chain_data_table[year]
-        #baci_products = baci_products.union(set(globalised_data.keys()))
-        hitachi_products = hitachi_products.union(set(supply_chain_data.keys()))
-        print(f"Number of Hitachi Products in Year {year}: {len(hitachi_products)}")
-        
-    #common_products = baci_products.intersection(hitachi_products)
+    country_map, product_map, globalised_data = read_BACI.get_BACI_data(year = year, hs_level = hs_level, aggregation_type = agg_type)
+    supply_chain_data = trading_map[year]
+    baci_products = set(globalised_data.keys())
+    hitachi_products =set(supply_chain_data.keys())
+    common_products = baci_products.intersection(hitachi_products)
+    #common_products.remove("VNM")
     
-    #print(f"Number of BACI Products: {len(baci_products)}")
+    print(f"Number of BACI Products: {len(baci_products)}")
     print(f"Number of Hitachi Products: {len(hitachi_products)}")
-    #print(f"Number of Joint Products: {len(common_products)}")
+    print(f"Number of Joint Products: {len(common_products)}")
+    
+    new_dict = {"iso_alpha": [], "coverage": []}
+    for product in common_products:
+        new_dict["iso_alpha"].append(product)
+        new_dict["coverage"].append(supply_chain_data[product]["currency"] / globalised_data[product]["currency"])
+    
+    #new_dict["coverage"] = np.clip(new_dict["coverage"], 0, 0.0001)
+    df = pd.DataFrame.from_dict(new_dict)
+    fig = px.choropleth(df, locations="iso_alpha",
+                    color="coverage", # lifeExp is a column of gapminder
+                    hover_name="iso_alpha", # column to add to hover information
+                    color_continuous_scale=px.colors.sequential.Reds,
+                       range_color=(0,0.001))
+    fig.update_layout(
+        margin=dict(l=20, r=20, t=20, b=20),
+    )
+    fig.show()
+        
+    
+    
     
     """
     with open("missing.json","w") as file: 

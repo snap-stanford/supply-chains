@@ -5,7 +5,7 @@ import read_BACI
 import read_Hitachi
 import matplotlib.pyplot as plt 
 import numpy as np
-import scipy
+import scipy.stats
 import sys
 from tqdm import tqdm
 import argparse
@@ -55,7 +55,7 @@ def plot_differences_with_regression(currency_points, weight_points, year, fname
     ax[0].plot(10**line_x, 10**line_y, linewidth = 1.5, color = "black")
     t = ax[0].text(x = 10**(text_weight_x * np.log10(min(currency_x)) + (1 - text_weight_x) * np.log10(max(currency_x))), 
                y = 10**(text_weight_y * np.log10(max(currency_x)) + (1 - text_weight_y) * np.log10(min(currency_y))), 
-               s = f"Log(y)={slope:.2f}Log(x)+{intercept:.2f}\nR\u00b2={r_val**2:.3f}", fontsize = 8)
+               s = f"Log(y)={slope:.2f}Log(x)+{intercept:.2f}\nR={r_val:.3f}", fontsize = 8)
     if include_boxes == True: t.set_bbox(dict(facecolor='orange', alpha=0.15))
     
     #plot shipping weight (x-axis being supply chain data, y-axis being the BACI global data)
@@ -72,7 +72,7 @@ def plot_differences_with_regression(currency_points, weight_points, year, fname
     ax[1].plot(10**line_x, 10**line_y, linewidth = 1.5, color = "black")
     t = ax[1].text(x = 10**(text_weight_x * np.log10(min(weight_x)) + (1 - text_weight_x) * np.log10(max(weight_x))), 
                y = 10**(text_weight_y * np.log10(max(weight_y)) + (1 - text_weight_y) * np.log10(min(weight_y))), 
-               s = f"Log(y)={slope:.2f}Log(x)+{intercept:.2f}\nR\u00b2={r_val**2:.3f}", fontsize = 8)
+               s = f"Log(y)={slope:.2f}Log(x)+{intercept:.2f}\nR={r_val:.3f}", fontsize = 8)
     if include_boxes == True: t.set_bbox(dict(facecolor='orange', alpha=0.15))
     
     for i in [0,1]:
@@ -80,7 +80,8 @@ def plot_differences_with_regression(currency_points, weight_points, year, fname
         ax[i].set_yscale("log")
     
     plt.savefig(fname)
-    plt.show()
+    plt.clf()
+    #plt.show()
         
 def run_stats_testing(currency_points, weight_points, year):
     currency_pearson = scipy.stats.pearsonr(np.log([c[0] for c in currency_points]), np.log([c[1] for c in currency_points]))
@@ -92,21 +93,23 @@ def run_stats_testing(currency_points, weight_points, year):
     print(f"\n#### Correlation Metrics Between Product-Level Hitachi and BACI Data in {year} ####")
     print(f"Pearson Coefficient for log(Currency Flow): {currency_pearson.statistic:.3f}")
     print(f"Pearson Coefficient for log(Shipping Weight): {weight_pearson.statistic:.3f}")
-    print(f"Spearman Coefficient for Currency Flow: {currency_spearman.statistic:.3f}")
-    print(f"Spearman Coefficient for Shipping Weight: {weight_spearman.statistic:.3f}")
+    print(f"Spearman Coefficient for Currency Flow: {currency_spearman.correlation:.3f}")
+    print(f"Spearman Coefficient for Shipping Weight: {weight_spearman.correlation:.3f}")
     
 if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Parse directory paths for data downloading.')
     parser.add_argument('--year', nargs='?', help='Year of data comparison', default = 2020)
     parser.add_argument('--hs_digits', nargs='?', help='Number of HS digits to group products by', default = 6)
+    parser.add_argument('--no_plot', help='Dont generate a matplotlib', action='store_true')
     args = parser.parse_args()
     
-    year = args.year
-    hs_level = args.hs_digits
+    year = int(args.year)
+    hs_level = int(args.hs_digits)
     
-    supply_chain_data = read_Hitachi.aggregate_sc_products(hs_level = hs_level, use_redshift = True)[year]
-    country_map, product_map, globalised_data = read_BACI.get_BACI_data(year = year, hs_level = hs_level)
+    country_map, product_map, trading_map = read_Hitachi.get_Hitachi_data(hs_level = hs_level, aggregation_type = "product")
+    supply_chain_data = trading_map[year]
+    country_map, product_map, globalised_data = read_BACI.get_BACI_data(year = year, hs_level = hs_level, aggregation_type = "product")
     
     common_products = set(supply_chain_data.keys()).intersection(set(globalised_data.keys()))
     
@@ -124,6 +127,7 @@ if __name__ == "__main__":
             weight_points.append((sc_info["currency"], globalised_info["currency"]))
         
     #save out scatterplot for the currency flow and global trade weight
-    plot_differences_with_regression(currency_points, weight_points, year, hs_level = hs_level, fname = f"./images/trade_{year}_hs{hs_level}.jpg")
+    if (args.no_plot == False):
+        plot_differences_with_regression(currency_points, weight_points, year, hs_level = hs_level, fname = f"./images/trade_{year}_hs{hs_level}.jpg", include_boxes = False)
     #statistical testing 
     run_stats_testing(currency_points, weight_points, year)

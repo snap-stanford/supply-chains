@@ -12,6 +12,7 @@ import glob
 from datetime import date
 import numpy as np
 
+#could probably add this to a separate file like utils
 geo_dict = {'ARGENTINA': 32,
  'AUSTRALIA': 36,
  'AUSTRIA': 40,
@@ -25,7 +26,7 @@ geo_dict = {'ARGENTINA': 32,
  'BRAZIL': 76,
  'CANADA': 124,
  'CHILE': 152,
-  #this is an accordance with the dataset, and not 
+  #this is an accordance with the dataset convention, and not 
   #an indication of my personal views, similar to any
   #other omissions and labellings throughout 
  'CHINA HONGKONG': 156,
@@ -100,10 +101,17 @@ geo_dict = {'ARGENTINA': 32,
 
 # parsing the year
 def parse_date(date_str: str) -> tuple[int]:
+    """
+    helper function: takes a string of the form year_month_day
+    and returns an integer for each time value.
+    """
     year, month, day = date_str.split("-")
     return int(year), int(month), int(day)
 
 def is_leap_year(year: int) -> bool:
+    """
+    helper function: returns whether a year (int) is a leap year (True) or not (False)
+    """
     if (year % 4 != 0 or (year % 100 == 0 and year % 400 != 0)):
         return False 
     return True
@@ -184,6 +192,9 @@ def get_hitachi_countries(country_csv = "./data/Hitachi/country_region.csv", com
     return siteid_2_country
     
 def get_transaction_years(start_date: str, end_date: str) -> dict:
+    """
+    [add documentation]
+    """
     start_year, start_month, start_day = parse_date(start_date)
     end_year, end_month, end_day = parse_date(end_date)
     if (start_year == end_year):
@@ -228,7 +239,7 @@ def get_entity_constructor(aggregation_type, country_map, hs_level):
     raise ValueError("invalid aggregation type")
     
 #new version (construction site status)
-def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "product", hs_level = 6, country_map = {}):
+def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "product", hs_level = 6, country_map = {}, filter_unknown = False):
     df = pd.read_csv(csv_file)
     n = len(df)
     
@@ -242,19 +253,24 @@ def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "
     
     entity_extractor = get_entity_constructor(aggregation_type, country_map, hs_level)
     print(f"#### Aggregating Hitachi Supply Chain for HS{hs_level} Entity Level {aggregation_type} ####")
-    t = 0
+    num_missing = 0
     for i in tqdm(range(n)):
         hs6_product, start_date, end_date, weight, currency = hs6_products[i], start_dates[i], end_dates[i], weight_list[i], currency_list[i]
         supplier, buyer = supplier_list[i], buyer_list[i]
         
         try:
             hybrid_entity = entity_extractor(supplier, buyer, hs6_product)
+            if (filter_unknown == True and country_map[supplier]["iso_alpha3"] == country_map[buyer]["iso_alpha3"]):
+                num_missing += 1
+                continue 
+                
         except: 
-            t += 1 
+            num_missing += 1 
             continue 
     
         year_weights = get_transaction_years(start_date, end_date)
         
+        #possibly pass this by reference [TODO] 
         for year in year_weights: 
             if (hybrid_entity in supply_chain_dict[year]):
                 supply_chain_dict[year][hybrid_entity]["weight"] += year_weights[year] * weight 
@@ -263,10 +279,13 @@ def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "
                 supply_chain_dict[year][hybrid_entity] = {"weight": year_weights[year] * weight,
                                                         "currency": year_weights[year] * currency}
     
-    print(f"Percent of Data Excised: {t / n * 100}%")
+    print(f"Percent of Data Excised: {num_missing / n * 100}%")
     return supply_chain_dict
     
 def get_Hitachi_data(data_dir = "./data/Hitachi", aggregation_type = "product", hs_level = 6):
+    """
+    add documentation
+    """
     product_codes_file = os.path.join(data_dir, "hs_category_description.csv")
     country_codes_file = os.path.join(data_dir, "country_region.csv")
     company_codes_file = os.path.join(data_dir, "group_subsidiary_site.csv")

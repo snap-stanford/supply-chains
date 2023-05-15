@@ -52,12 +52,6 @@ def read_product_codes(csv_file = "./data/BACI/product_codes_HS17_V202301.csv"):
             
     return code2product
 
-#def get_combined_entity(exporter, importer, product, aggregation_type):
-#    entity_map = {"exporter": exporter, "importer": importer, "product": product}
-#    entities = [entity.strip() for entity in aggregation_type.split("_")]
-#    if len(entities) == 1: return entity_map[entities[0]]
-#    return (entity_map[entity] for entity in entities)
-
 def get_entity_constructor(aggregation_type, country_map):
     """
     note: wanted to implement this with prettier code, but this optimises performance noticeably 
