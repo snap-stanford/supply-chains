@@ -1,26 +1,9 @@
+from constants_and_utils import *
 import pandas as pd
 import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
-
-BATTERY_PARTS = [
-            '850760', '280440', '281700', '282110', '282200', '382490', 
-            '382499', '390210', '392020', '392051', '392099', '392119', 
-            '392310', '392690', '401140', '401390', '401699', '420212', 
-            '721240', '722230', '722699', '730120', '730690', '730711', 
-            '730890', '731100', '731816', '732599', '732619', '732620', 
-            '732690', '740822', '740919', '740921', '741011', '741021', 
-            '741022', '741220', '741529', '741533', '741999', '750522', 
-            '750610', '750620', '760612', '760719', '760720', '761699', 
-            '790700', '810590', '830230', '830249', '831110', '831120', 
-            '831190', '848049', '848280', '850110', '850120', '850440', 
-            '850450', '850590', '850640', '850650', '850660', '850680', 
-            '850730', '850780', '850790', '851830', '851890', '853222', 
-            '853223', '853340', '853610', '853630', '853641', '854190', 
-            '854290', '854370', '854411', '854442', '854519', '854720', 
-            '860900'
-        ]
-BATTERY = '850760'
+from scipy.stats import pearsonr, spearmanr
 
 
 class MultiTierSC():
@@ -218,3 +201,25 @@ def compare_orderings_across_k(orderings, labels, title=''):
         ymin, ymax = ax.get_ylim()
         ax.set_ylim(0, ymax)
     plt.show()
+    
+    
+def get_deduped_records_for_company_and_hs(companies, hs_code, rs, mode, by_date=True):
+    """
+    Get deduped records using primary key for a list of companies (either supplier or buyer)
+    and hs_code.
+    """
+    assert mode in {'supplier', 'buyer'}
+    company_str = f"{mode}_t like '{companies[0]}'" + "".join([f" or {mode}_t like '{company}'" for company in companies[1:]])
+    query = f"select {PRIMARY_KEY}, COUNT(*) as count, COUNT(DISTINCT id) as num_ids from logistic_data where hs_code like '{hs_code}%' and ({company_str}) GROUP BY {PRIMARY_KEY}"
+    if by_date:  # group by date
+        query = f"select date, COUNT(*) as bill_count, SUM(quantity) as total_quantity, SUM(amount) as total_amount, SUM(weight) as total_weight from ({query}) GROUP BY date"
+    print(query)
+    
+    df = rs.query_df(query)
+    assert len(df) == len(df.drop_duplicates())
+    print('Found %d rows' % len(df))
+    df['month'] = df.date.apply(lambda x: str(x).rsplit('-', 1)[0])
+    df['datetime'] = pd.to_datetime(df.date)
+    df['month_datetime'] = pd.to_datetime(df.month)
+    df = df.sort_values('datetime').set_index('datetime')
+    return df
