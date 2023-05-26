@@ -74,16 +74,17 @@ def get_entity_constructor(aggregation_type, country_map):
 
 def aggregate(csv_file =  "./data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation_type = "product", hs_level = 6, country_map = {}):
     """
-    reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
+    reads the BACI file on bilateral trade, aggregating under the specified entity combination (aggregation_type)
     
     Args:
         csv_file (str): path to a yearly BACI trade file
         aggregation_type (str): specifies the entity combinations for which we calculate trade flows.
                                 Should take the form [entity1]_[entity2]_ ..., where each entity is among 
                                ["exporter","importer","product"] and ordered as such (e.g. no product_importer)
-                                
         hs_level (int): the number of HS digits we use to represent products 
                         i.e. level of product granularity. Should be in [2,4,6].
+        country_map (dict): maps from country id in the dataset to the standardised ISO codes. can be empty
+                        if not aggregating for countries (i.e. aggregation_type is product)
         
     Returns:
          dict: an econometrics dictionary from entities (e.g. country, product; see aggregation_type) to
@@ -122,7 +123,7 @@ def aggregate(csv_file =  "./data/BACI/BACI_HS17_Y2018_V202301.csv", aggregation
 
 def get_BACI_data(data_dir = "./data/BACI", aggregation_type = "product", year = 2020, hs_level = 6):
     """
-    reads a BACI yearly file on bilateral trade, aggregating across country pairs for each product
+    reads a BACI yearly file on bilateral trade, aggregating under the specified entity combination (aggregation_type)
     
     Args:
         data_dir (str): path--preferably absolute--to the directory storing the BACI data
@@ -149,7 +150,9 @@ def get_BACI_data(data_dir = "./data/BACI", aggregation_type = "product", year =
     return country_map, product_map, trading_map
     
 if __name__ == "__main__":
-    
+    """
+    for testing out the functions above and printing a results snippe 
+    """
     aggregation_type = "exporter_importer_product" if (len(sys.argv) == 1) else sys.argv[1]
     entities = aggregation_type.strip().split("_")
     country_map, product_map, trading_map = get_BACI_data("/home/jamin/supply-chains/data/BACI", 

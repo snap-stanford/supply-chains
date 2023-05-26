@@ -11,93 +11,8 @@ import os
 import glob
 from datetime import date
 import numpy as np
-
-#could probably add this to a separate file like utils
-geo_dict = {'ARGENTINA': 32,
- 'AUSTRALIA': 36,
- 'AUSTRIA': 40,
- 'AZERBAIJAN': 31,
- 'BANGLADESH': 50,
- 'BELARUS': 112,
- 'BELGIUM': 56,
- 'BHUTAN': 64,
- 'BOSNIA AND HERZEGOVINA': 70,
- 'BOTSWANA': 72,
- 'BRAZIL': 76,
- 'CANADA': 124,
- 'CHILE': 152,
-  #this is an accordance with the dataset convention, and not 
-  #an indication of my personal views, similar to any
-  #other omissions and labellings throughout 
- 'CHINA HONGKONG': 156,
- 'CHINA MAINLAND': 156,
- 'CHINA TAIWAN': 156,
- 'COLOMBIA': 170,
- 'COSTA RICA': 188,
- 'CZECHIA': 203,
- "CÔTE D'IVOIRE": 384,
- 'DENMARK': 208,
- 'DJIBOUTI': 262,
- 'ECUADOR': 218,
- 'EGYPT': 818,
- 'FRANCE': 251,
- 'GERMANY': 276,
- 'GREECE': 300,
- 'INDIA': 699,
- 'INDONESIA': 360,
- 'IRELAND': 372,
- 'ISRAEL': 376,
- 'ITALY': 381,
- 'JAPAN': 392,
- 'KAZAKHSTAN': 398,
- 'KENYA': 404,
-  # 'KOSOVO',
- 'KUWAIT': 414,
- 'LIECHTENSTEIN': 757,
- 'LITHUANIA': 440,
- 'MALAYSIA': 458,
- 'MALTA': 470,
- 'MEXICO': 484,
- 'MOLDOVA': 498,
- 'NAMIBIA': 516,
- 'NEPAL': 524,
- 'NETHERLANDS': 528,
- 'NEW ZEALAND': 554,
- 'NIGERIA': 566,
- 'NORTH MACEDONIA': 807,
- 'OMAN': 512,
- 'PAKISTAN': 586,
- 'PANAMA': 591,
- 'PERU': 604,
- 'PHILIPPINES': 608,
- 'POLAND': 616,
- 'PORTUGAL': 620,
- 'PUERTO RICO': 842,
- 'QATAR': 634,
- 'RUSSIA': 643,
- 'SAINT BARTHELEMY': 652,
- 'SAUDI ARABIA': 682,
- 'SINGAPORE': 702,
- 'SOUTH AFRICA': 710,
- 'SOUTH KOREA': 410,
- 'SPAIN': 724,
- 'SRI LANKA': 144,
- 'SWEDEN': 752,
- 'SWITZERLAND': 757,
- 'TANZANIA': 834,
- 'THAILAND': 764,
- 'TUNISIA': 788,
- 'TURKEY': 792,
- 'UGANDA': 800,
- 'UKRAINE': 804,
- 'UNITED ARAB EMIRATES': 784,
- 'UNITED KINGDOM': 826,
- 'UNITED STATES': 842,
- 'URUGUAY': 858,
- 'UZBEKISTAN': 860,
- 'VIETNAM': 704,
- 'VIRGIN ISLANDS (BRITISH)': 92,
- 'ZIMBABWE': 716}
+import argparse
+from constants import geo_dict
 
 # parsing the year
 def parse_date(date_str: str) -> tuple[int]:
@@ -220,7 +135,11 @@ def get_transaction_years(start_date: str, end_date: str) -> dict:
 
 def get_entity_constructor(aggregation_type, country_map, hs_level):
     """
-    note: wanted to implement this with prettier code, but this optimises performance noticeably 
+    returns a tuple of the desired entity combination (a subset of {exporter, importer, product}) to be
+    used for aggregating transactions
+    
+    note: wanted to implement this with prettier code, but this (the stratified
+    use of lambda functions) optimises performance noticeably 
     """
     if (aggregation_type == "exporter"):
         return lambda exporter, importer, product: country_map[exporter]["iso_alpha3"]
@@ -238,8 +157,25 @@ def get_entity_constructor(aggregation_type, country_map, hs_level):
         return lambda exporter, importer, product: (country_map[exporter]["iso_alpha3"], country_map[importer]["iso_alpha3"], int(str(int(product))[:hs_level]))
     raise ValueError("invalid aggregation type")
     
-#new version (construction site status)
 def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "product", hs_level = 6, country_map = {}, filter_unknown = False):
+    """
+    reads the Hitachi index file, aggregating under the specified entity combination (agagregation_type)
+    
+    Args:
+        csv_file (str): path to the index_hs6 Hitachi file
+        aggregation_type (str): specifies the entity combinations for which we calculate trade flows.
+                                Should take the form [entity1]_[entity2]_ ..., where each entity is among 
+                               ["exporter","importer","product"] and ordered as such (e.g. no product_importer)
+        hs_level (int): the number of HS digits we use to represent products 
+                        i.e. level of product granularity. Should be in [2,4,6].
+        country_map (dict): maps from country id in the dataset to the standardised ISO codes. can be empty
+                        if not aggregating for countries (i.e. aggregation_type is product)
+        
+    Returns:
+         dict: an econometrics dictionary from entities (e.g. country, product; see aggregation_type) to
+                 aggregated currency flow (in current US dollars) and weight (in metric tonnes) in global trade
+             
+    """
     df = pd.read_csv(csv_file)
     n = len(df)
     
@@ -254,23 +190,24 @@ def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "
     entity_extractor = get_entity_constructor(aggregation_type, country_map, hs_level)
     print(f"#### Aggregating Hitachi Supply Chain for HS{hs_level} Entity Level {aggregation_type} ####")
     num_missing = 0
+    
+    #iterate through all transaction entries in the index table, and extract their weight, currency, and prodcut
     for i in tqdm(range(n)):
         hs6_product, start_date, end_date, weight, currency = hs6_products[i], start_dates[i], end_dates[i], weight_list[i], currency_list[i]
         supplier, buyer = supplier_list[i], buyer_list[i]
         
-        try:
+        try: #see whether the entity combination can be referenced in the database
             hybrid_entity = entity_extractor(supplier, buyer, hs6_product)
+            
+            #if filter_unknown, then harshly excise any entries where either supplier or buyer countries are unavailable 
             if (filter_unknown == True and country_map[supplier]["iso_alpha3"] == country_map[buyer]["iso_alpha3"]):
-                num_missing += 1
-                continue 
+                num_missing += 1; continue 
                 
         except: 
-            num_missing += 1 
-            continue 
-    
-        year_weights = get_transaction_years(start_date, end_date)
+            num_missing += 1; continue 
         
-        #possibly pass this by reference [TODO] 
+        #update the aggregation dict across all years the transaction took place
+        year_weights = get_transaction_years(start_date, end_date)
         for year in year_weights: 
             if (hybrid_entity in supply_chain_dict[year]):
                 supply_chain_dict[year][hybrid_entity]["weight"] += year_weights[year] * weight 
@@ -284,7 +221,18 @@ def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "
     
 def get_Hitachi_data(data_dir = "./data/Hitachi", aggregation_type = "product", hs_level = 6):
     """
-    add documentation
+    reads the data files from a specified Hitachi data directory, aggregating at the specified entity level
+    
+    Args:
+        data_dir (str): path--preferably absolute--to the directory storing the BACI data
+        aggregation_type (str): species the entity combinations for which we calculate trade flows (see aggregate)
+        hs_level (int): The granularity of HS products (whether to use first 2, 4, or 6 digits)
+                        
+    Returns:
+         tuple[dict]: Three dictionaries. (1) from internal county codes used in Hitachi dataset to 
+                     globally standardised ISO codes, (2) from product HS6 codes to
+                    Hitachi descriptions, (3) from hs6 product code to aggregated USD currency and 
+                     weight in global trade flows of that product
     """
     product_codes_file = os.path.join(data_dir, "hs_category_description.csv")
     country_codes_file = os.path.join(data_dir, "country_region.csv")
@@ -298,7 +246,9 @@ def get_Hitachi_data(data_dir = "./data/Hitachi", aggregation_type = "product", 
     return country_map, product_map, trading_map
     
 if __name__ == "__main__":
-
+    """
+    for testing out the code and printing out a results snippet
+    """
     country_map, product_map, trading_map = get_Hitachi_data(aggregation_type = sys.argv[1], hs_level = 6)
     
     trading_map = trading_map[2020]

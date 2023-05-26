@@ -118,6 +118,7 @@ if __name__ == "__main__":
     #iterate through all products, and excising ones with non-reported values
     print(f"#### Comparing HS{hs_level} Product-Level Econometrics in Hitachi vs. BACI ({year}) ####")
     for product in tqdm(common_products):
+        
         sc_info = supply_chain_data[product]
         globalised_info = globalised_data[product]
         
