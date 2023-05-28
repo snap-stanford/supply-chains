@@ -22,6 +22,28 @@ BATTERY_PARTS = [
             '860900'
         ]
 BATTERY = '850760'
+dict_regex = {
+    "samsung": ["%samsung%", "sevt", "sehc", "sdiv"],
+    "wistron": ["%wistron%"],
+    "hp": ["hp %"],
+    "elentec": ["%elentec%"],
+    "itm": ["%itm %"],
+    "verdant": ["verdant %"],
+    "luxshare": ["%luxshare%", "lxvt", "lxvn"],
+    "apple": ["%apple %"],
+    "wingtech": ["wingtech %"],
+    "lg": ['%lg %', 'lgdvh', 'lgevh', 'lgitvh'], 
+    "techtronic": ["%techtronic%", "%tti %"],
+    "arnold": ["arnold %"],
+    "hefei_gotion": ["hefei gotion %"],
+    "shenzhen_chenshi": ["%shenzhen chenshi %"],
+    "tcl": ["tcl %"],
+    "hansol": ["%hansol %"],
+    "buckeye": ["%buckeye %"],
+    "compal": ["%compal %"],
+    "truper": ["%truper %"]
+}
+THRESHOLD = 100
 
 def check_memory_usage(print_message=True):
     """
@@ -61,8 +83,8 @@ def apply_smoothing(ts, num_before=3, num_after=3):
     Return smoothed timeseries where the entry at time t is the average value 
     from t-num_before to t+num_after (inclusive).
     """
-    assert num_before >= 1
-    assert num_after >= 1
+    assert num_before >= 0
+    assert num_after >= 0
     smoothed_ts = np.zeros(len(ts)) * np.nan
     for i in range(len(ts)):
         smoothed_ts[i] = np.nanmean(ts[i-num_before:i+num_after+1])
@@ -99,3 +121,5 @@ def extract_daily_timeseries(pd_series, min_datetime, max_datetime, verbose=True
     if verbose:
         print('%d/%d days have data' % (len(dates)-np.isnan(vals).sum(), len(dates)))
     return dates, vals
+
+BOM = {k.lower(): v for k, v in parse_battery_bom().items()}
