@@ -196,12 +196,13 @@ def plot_time_versus_sale_purchase(supply_df, buy_df, SUPPLY_PROD='battery', BUY
     filename = f'time_versus_sale_purchase_amount_{supply_name}_{buy_name}_{time}_{csv_name}.jpg'
     save_fig(fig, outdir, filename)
 
-def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='battery', BUY_PROD='bms', time='monthly', num_before=0, num_after=0, csv_name='samsung'):
+def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='battery', BUY_PROD='bms', time='monthly', num_before=0, num_after=0, lag=0, do_plot=True, csv_name='samsung'):
     '''Calculate correlation for sale info (quantity) over time per supply hs_code, buy hs_code
     Args:
         time (str): supports 'daily', 'weekly', or 'monthly'
         num_before (int): nonnegative integer, see utils 'apply_smoothing'
         num_after (int): nonnegative integer, see utils 'apply_smoothing'
+        lag (int): shift buy product backward for {lag} days, only supports 'daily' time level
     Returns:
         summary_df (pd.DataFrame): a single row that records summary statistics fo time series correlations
     '''
@@ -213,7 +214,11 @@ def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='ba
     time_col = get_time_col(time)
     supply_df['hs_code_str'] = supply_df.hs_code.astype(str)  # convert HS code to str
     buy_df['hs_code_str'] = buy_df.hs_code.astype(str)  # convert HS code to str
-
+    
+    # add lags
+    if time=='daily' and lag!=0:
+        buy_df[time_col] += datetime.timedelta(days=lag)
+        
     # prepare summary table
     summary_df = {}
     summary_df['group'] = csv_name
@@ -234,16 +239,17 @@ def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='ba
             supply_summary.replace(supply_summary.values, smooth_values, inplace=True)
             supply_summary.fillna(0, inplace=True)
             
-            # Plot: supply
-            fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
-            ax = axes[0]           
-            ax.set_title(f'{time} sales of {supply_hs}', fontsize=12)
-            ax.plot(supply_summary.index.values, supply_summary.values)
-            ax.set_ylabel('Total quantity', fontsize=12)
-            
+            if do_plot:
+                # Plot: supply
+                fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+                ax = axes[0]           
+                ax.set_title(f'{time} sales of {supply_hs}', fontsize=12)
+                ax.plot(supply_summary.index.values, supply_summary.values)
+                ax.set_ylabel('Total quantity', fontsize=12)
+                ax = axes[1]
+                ax.set_title(f'{time} purchases of {buy_name}', fontsize=12)
+                
             # Apply smoothing, calculate correlation: all buy
-            ax = axes[1]
-            ax.set_title(f'{time} purchases of {buy_name}', fontsize=12)
             summary_df[f"# of buy txn {buy_name}_all"] = len(buy_df)
             if len(buy_df) <= THRESHOLD:
                 summary_df[f"corr {supply_name}_{supply_hs}, {buy_name}_all smooth_{num_before}_{num_after}"] = None
@@ -258,7 +264,10 @@ def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='ba
                 # Calculate correlation: buy
                 merged = pd.merge(supply_summary.rename('x'), buy_summary.rename('y'), 
                                           left_index=True, right_index=True, how='inner')
-                r, p = pearsonr(merged.x, merged.y)
+                if len(merged.x) < 2 or len(merged.y) < 2:
+                    r, p = float("nan"), float("nan")
+                else:
+                    r, p = pearsonr(merged.x, merged.y)
                 summary_df[f"corr {supply_name}_{supply_hs}, {buy_name}_all smooth_{num_before}_{num_after}"] = r                
                 
             # Apply smoothing, calculate correlation: per buy hscode
@@ -280,22 +289,32 @@ def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='ba
                     # Calculate correlation: buy hscode
                     merged = pd.merge(supply_summary.rename('x'), buy_summary.rename('y'), 
                                       left_index=True, right_index=True, how='inner')
-                    r, p = pearsonr(merged.x, merged.y)
+                    if len(merged.x) < 2 or len(merged.y) < 2:
+                        r, p = float("nan"), float("nan")
+                    else:
+                        r, p = pearsonr(merged.x, merged.y)
                     print(buy_hs, len(sub_buy_df), 'r=%.3f (n=%d, p=%.3f)' % (r, len(merged), p)) # number of transaction, n is number of dates
                     summary_df[f"corr {supply_name}_{supply_hs}, {buy_name}_{buy_hs} smooth_{num_before}_{num_after}"] = r
                     
-                    # Normalize by mean to make plot easier
-                    ax.plot(buy_summary.index.values, buy_summary.values / np.mean(buy_summary.values), label=buy_hs)
-                                        
-            ax.legend(bbox_to_anchor=(1,1))
-            ax.set_ylabel('Total quantity (normalized)', fontsize=12)
-            plt.show()
+                    if do_plot:
+                        # Normalize by mean to make plot easier
+                        ax.plot(buy_summary.index.values, buy_summary.values / np.mean(buy_summary.values), label=buy_hs)
+            if do_plot:
+                ax.legend(bbox_to_anchor=(1,1))
+                ax.set_ylabel('Total quantity (normalized)', fontsize=12)
+                plt.show()
             
-        # save figure 
-        outdir = f'./fig/{csv_name}/'
-        time_surfix = f"{time_col}" + f"_smooth_{num_before}_{num_after}" if num_before + num_after > 0 else ""
-        filename = f'compare_sale_purchase_quantity_{supply_name}_{supply_hs}_{buy_name}_{time_surfix}_{csv_name}.jpg'
-        save_fig(fig, outdir, filename)
+        if do_plot:
+            # save figure 
+            outdir = f'./fig/{csv_name}/'
+            time_surfix = f"{time_col}" + f"_smooth_{num_before}_{num_after}" if num_before + num_after > 0 else ""
+            filename = f'compare_sale_purchase_quantity_{supply_name}_{supply_hs}_{buy_name}_{time_surfix}_{csv_name}.jpg'
+            save_fig(fig, outdir, filename)
+    
+    # remove lags
+    if time=='daily' and lag!=0:
+        buy_df[time_col] -= datetime.timedelta(days=lag)
+        
     return summary_df
 
 def get_hs_r_cnt_values(df):
@@ -349,3 +368,37 @@ def plot_summary(company):
     
     fig.savefig(f"./summary/{company}_viz.jpg", bbox_inches="tight")
     return num_battery_txn, num_bms_txn, num_baseline_txn
+
+def plot_lag(company, num_before, num_after):
+    import matplotlib
+    
+    lag_df = pd.read_csv(f"./summary/{company}_smooth_{num_before}-{num_after}_lag.csv")
+    baseline_df = pd.read_csv(f"./summary/{company}_smooth_{num_before}-{num_after}_lag_baseline.csv")
+
+    plt.figure(figsize=(10,8))
+    
+    cmap = matplotlib.cm.Blues(np.linspace(0,1,len(lag_df.columns)))
+    for idx, col in enumerate(lag_df.columns):
+        if "#" in col:
+            print(f"{col}: {lag_df[col][0]}")
+            label = col.split('_')[-1]
+        elif "corr" in col and "all" not in col: 
+            plt.plot(lag_df.index.values, lag_df[col].values, label=label, color=cmap[idx])
+            
+    print("\n")
+    
+    cmap = matplotlib.cm.Oranges(np.linspace(0,1,len(baseline_df.columns)))
+    for idx, col in enumerate(baseline_df.columns):
+        if "#" in col:
+            print(f"{col}: {baseline_df[col][0]}")
+            label = col.split('_')[-1]
+        elif "corr" in col and "all" not in col: 
+            plt.plot(baseline_df.index.values, baseline_df[col].values, label=label, color=cmap[idx])
+
+    plt.xlabel("Lag for buy product (days)")
+    plt.ylabel("R-value (31 day smooth)")
+    plt.ylim(-1, 1)
+    plt.legend(loc ="lower right", bbox_to_anchor=(1.2,0))
+    plt.title(f"{company}: Battery-BMS vs -Baseline Quantity Correlation over Lags (Days)")
+    plt.show()
+    plt.savefig(f"./summary/{company}_lag.jpg", bbox_inches="tight")
