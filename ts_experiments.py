@@ -268,7 +268,9 @@ def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='ba
                     r, p = float("nan"), float("nan")
                 else:
                     r, p = pearsonr(merged.x, merged.y)
-                summary_df[f"corr {supply_name}_{supply_hs}, {buy_name}_all smooth_{num_before}_{num_after}"] = r                
+                summary_df[f"corr {supply_name}_{supply_hs}, {buy_name}_all smooth_{num_before}_{num_after}"] = r 
+                summary_df[f"p-value {supply_name}_{supply_hs}, {buy_name}_all smooth_{num_before}_{num_after}"] = p
+                
                 
             # Apply smoothing, calculate correlation: per buy hscode
             for buy_hs in buy_hs_codes:
@@ -295,6 +297,7 @@ def compare_sale_purchase_quantity_per_hscode(supply_df, buy_df, SUPPLY_PROD='ba
                         r, p = pearsonr(merged.x, merged.y)
                     print(buy_hs, len(sub_buy_df), 'r=%.3f (n=%d, p=%.3f)' % (r, len(merged), p)) # number of transaction, n is number of dates
                     summary_df[f"corr {supply_name}_{supply_hs}, {buy_name}_{buy_hs} smooth_{num_before}_{num_after}"] = r
+                    summary_df[f"p-value {supply_name}_{supply_hs}, {buy_name}_{buy_hs} smooth_{num_before}_{num_after}"] = p
                     
                     if do_plot:
                         # Normalize by mean to make plot easier
@@ -383,7 +386,11 @@ def plot_lag(company, num_before, num_after):
             print(f"{col}: {lag_df[col][0]}")
             label = col.split('_')[-1]
         elif "corr" in col and "all" not in col: 
-            plt.plot(lag_df.index.values, lag_df[col].values, label=label, color=cmap[idx])
+            corr_values = lag_df[col].values
+        elif "p-value" in col and "all" not in col: 
+            p_values = lag_df[col].values
+            corr_values[p_values > 0.1] = np.nan
+            plt.plot(lag_df.index.values, corr_values, label=label, color=cmap[idx], marker = '.')
             
     print("\n")
     
@@ -393,7 +400,11 @@ def plot_lag(company, num_before, num_after):
             print(f"{col}: {baseline_df[col][0]}")
             label = col.split('_')[-1]
         elif "corr" in col and "all" not in col: 
-            plt.plot(baseline_df.index.values, baseline_df[col].values, label=label, color=cmap[idx])
+            corr_values = baseline_df[col].values
+        elif "p-value" in col and "all" not in col: 
+            p_values = baseline_df[col].values
+            corr_values[p_values > 0.1] = np.nan
+            plt.plot(baseline_df.index.values, corr_values, label=label, color=cmap[idx], marker = '.')
 
     plt.xlabel("Lag for buy product (days)")
     plt.ylabel("R-value (31 day smooth)")
