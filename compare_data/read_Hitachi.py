@@ -200,8 +200,8 @@ def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "
             hybrid_entity = entity_extractor(supplier, buyer, hs6_product)
             
             #if filter_unknown, then harshly excise any entries where either supplier or buyer countries are unavailable 
-            if (filter_unknown == True and country_map[supplier]["iso_alpha3"] == country_map[buyer]["iso_alpha3"]):
-                num_missing += 1; continue 
+            #if (filter_unknown == True and country_map[supplier]["iso_alpha3"] == country_map[buyer]["iso_alpha3"]):
+             #   num_missing += 1; continue 
                 
         except: 
             num_missing += 1; continue 
@@ -210,10 +210,10 @@ def aggregate_sc(csv_file = "./data/Hitachi/index_hs6.csv", aggregation_type = "
         year_weights = get_transaction_years(start_date, end_date)
         for year in year_weights: 
             if (hybrid_entity in supply_chain_dict[year]):
-                supply_chain_dict[year][hybrid_entity]["weight"] += year_weights[year] * weight 
+                supply_chain_dict[year][hybrid_entity]["weight"] += year_weights[year] * weight * 0.001
                 supply_chain_dict[year][hybrid_entity]["currency"] += year_weights[year] * currency
             else: 
-                supply_chain_dict[year][hybrid_entity] = {"weight": year_weights[year] * weight,
+                supply_chain_dict[year][hybrid_entity] = {"weight": year_weights[year] * weight * 0.001,
                                                         "currency": year_weights[year] * currency}
     
     print(f"Percent of Data Excised: {num_missing / n * 100}%")
