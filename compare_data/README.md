@@ -3,7 +3,7 @@
 A base Conda environment should be sufficient, with the principal Python libraries being `matplotlib`, `numpy`, `scipy`, and `pandas`. For retrieving the Hitachi data, this code should be run on their `JupyterHub` server, interlaced with their remote `AWS ec2` data container and RedShift API.
 
 <figure>
-  <img src="chloropleth3.png" alt="Chloropleth map of global trade flows" style="width:60%; display:block; margin-left:auto, margin-right: auto">
+  <img src="chloropleth3.png" alt="Chloropleth map of global trade flows" style="width:90%; display:block; margin-left:auto, margin-right: auto">
     <figcaption><em>Country exports and imports as computed in BACI data.</em></figcaption>
 </figure>
 
@@ -37,7 +37,8 @@ For instance, if one wanted to compute the amount and weight of knitted / croche
 ```python
 import read_BACI
 
-country_map, product_map, trade_flow_map = read_BACI.get_BACI_data(data_dir = "./data/BACI", aggregation_type = "importer_product", year = 2020, hs_level = 6)
+country_map, product_map, trade_flow_map = read_BACI.get_BACI_data(data_dir = "./data/BACI", 
+                                                                   aggregation_type = "importer_product", year = 2020, hs_level = 6)
 
 importer_country = "USA"
 product_code = 611090
@@ -51,7 +52,9 @@ Here, `country_map` maps from country IDs to names, `product_map` maps from HS c
 ```python
 print(product_map[product_code])
 
-"""output: Jerseys, pullovers, cardigans, waistcoats and similar articles: of textile materials (other than wool or fine animal hair, cotton or man-made fibres), knitted or crocheted"""
+"""output: Jerseys, pullovers, cardigans, waistcoats and similar articles: 
+of textile materials (other than wool or fine animal hair, cotton 
+or man-made fibres), knitted or crocheted"""
 ```
 
 ### Hitachi Dataset
@@ -60,7 +63,8 @@ For Hitachi, one would run an analagous script, although the `year` is provided 
 ```python
 import read_Hitachi
 
-country_map, product_map, trade_flow_map = read_Hitachi.get_Hitachi_data(data_dir = "./data/Hitachi", aggregation_type = "exporter_product", hs_level = 6)
+country_map, product_map, trade_flow_map = read_Hitachi.get_Hitachi_data(data_dir = "./data/Hitachi", 
+                                                                         aggregation_type = "exporter_product", hs_level = 6)
 
 #flexible iron or steel tubing
 product_code = 830710 
