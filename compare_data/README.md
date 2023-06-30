@@ -8,7 +8,7 @@ A base Conda environment should be sufficient, with the principal Python librari
 </figure>
 
 ## Data 
-The Hitachi supply chain data resides on the JupyterLab server. The BACI data (based on UN COMTRADE) is available at [dataset link](`http://www.cepii.fr/CEPII/en/bdd_modele/bdd_modele_item.asp?id=37`), with the most recent version HS17. You can either download and unzip all the BACI `.csv` files to the same directory, or run
+The Hitachi supply chain data resides on the JupyterLab server. The BACI data (based on UN COMTRADE) is available at <a href = "http://www.cepii.fr/CEPII/en/bdd_modele/bdd_modele_item.asp?id=37">link</a>, with the most recent version HS17. You can either download and unzip all the BACI `.csv` files to the same directory, or run
 ```zsh
 mkdir data
 mkdir data/BACI
