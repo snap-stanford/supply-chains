@@ -133,7 +133,7 @@ def get_product_table(redshift):
     #iterate through all listed products extracted from the query
     hscode_to_product = {}
     for hs6, category, sub_category, description in zip(*rows):
-        hs6_code = hs6.zfill(6) #all six digits
+        hs6_code = str(int(hs6)).zfill(6) #all six digits
         hs4_code = str(int(hs6) // 10**2).zfill(4) #first four digits
         hs2_code = str(int(hs6) // 10**4).zfill(2) #first two digits
 

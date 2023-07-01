@@ -65,11 +65,11 @@ def retrieve_timestamped_data(redshift, start_date = "2019-01-01", length_timest
     #restrict transactions to a certain list of product codes
     product_condition = ""
     for code in hs6_codes: product_condition += f"hs_code like '{code}%' OR "
-    product_condition = product_condition[:-3] #get rid of last OR at the tail
+    product_condition = "({}) AND".format(product_condition[:-3]) #get rid of last OR at the tail
 
     #restrict the transactions to the specified time period, and deduplicate 
     query = f"select {PRIMARY_KEY}, DATEDIFF(day, '{start_date}', date) as time_interval, COUNT(*) as count, \
-    COUNT(DISTINCT id) as num_ids from logistic_data WHERE ({product_condition}) AND time_interval \
+    COUNT(DISTINCT id) as num_ids from logistic_data WHERE {product_condition} time_interval \
     BETWEEN 0 AND {max_day-1} GROUP BY {PRIMARY_KEY}, time_interval"
     
     #aggregate based on the cadence specified by length_timestamps (number of days between consecutive time stamps) 
@@ -101,6 +101,7 @@ if __name__ == "__main__":
     rs = RedshiftClass(args.rs_login[0], args.rs_login[1])
     df = retrieve_timestamped_data(rs, args.start_date, args.length_timestamps, args.num_timestamps,
                                   hs6_codes = BATTERY_RELATED_CODES)
+    df = df[df["hs6"].str.match('^(?!00)[0-9]{6}')] #check for valid HS6 product codes via regex
     
     #create the company ID -> name mapper, and replace the IDs in the dataframe with company titles
     if (args.use_titles == True):
