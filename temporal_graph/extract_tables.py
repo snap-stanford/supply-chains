@@ -16,21 +16,21 @@ from dotenv import load_dotenv
 import pandas as pd
 from pycountry_convert import country_name_to_country_alpha3
 
-def get_country_table(redshift_instance):
+def get_country_table(redshift):
     """
     Generates a map from country names as they appear in logistic_data to country
     ISO alpha-3 codes, which are the international convention. 
     
     Args:
-        redshift_instance (RedshiftClass): An instance of Redshift Class, 
+        redshift (RedshiftClass): An instance of Redshift Class, 
     
     Returns:
         dict[str:str]: A dictionary from country names (key) to ISO alpha-3 codes (value).
     """
     
     #query for countries that appear as importers and exporters for transactions
-    df_importer = rs.query_df("select dest_country as country from logistic_data GROUP BY country")
-    df_exporter = rs.query_df("select orig_country as country from logistic_data GROUP BY country")
+    df_importer = redshift.query_df("select dest_country as country from logistic_data GROUP BY country")
+    df_exporter = redshift.query_df("select orig_country as country from logistic_data GROUP BY country")
 
     #iterate through all countries and see whether they appear in the pycountry Python library
     all_countries = set(df_importer["country"]).union(set(df_exporter["country"]))
@@ -66,12 +66,12 @@ def get_country_table(redshift_instance):
     assert set(all_countries) == set(country_to_iso3.keys())
     return country_to_iso3
     
-def get_company_table(redshift_instance):
+def get_company_table(redshift):
     """
     Generates a map from company IDs in logistic_data to their corresponding names / titles.
 
     Args:
-        redshift_instance (RedshiftClass): An instance of Redshift Class 
+        redshift (RedshiftClass): An instance of Redshift Class 
     
     Returns:
         company2id (dict[str:str]): A dictionary from company titles to IDs
@@ -80,9 +80,9 @@ def get_company_table(redshift_instance):
     
     #query for all companies that appear as either buyers or sellers
     query = f"select COUNT(*) as count, supplier_id, supplier_t from logistic_data GROUP BY supplier_id, supplier_t"
-    df_supplier = rs.query_df(query)
+    df_supplier = redshift.query_df(query)
     query = f"select COUNT(*) as count, buyer_id, buyer_t from logistic_data GROUP BY buyer_id, buyer_t"
-    df_buyer = rs.query_df(query)
+    df_buyer = redshift.query_df(query)
     
     #concatenate into one table, remove duplicates
     df_combined = pd.concat([df_supplier.rename(columns = {"supplier_id":"company_id", "supplier_t":"company_t"}), 
@@ -108,14 +108,14 @@ def get_company_table(redshift_instance):
 
     return company2id, id2company
 
-def get_product_table(redshift_instance):
+def get_product_table(redshift):
     """
     Generates a map from Harmonized System (HS) product codes (at the 2, 4, and 6 digit levels)
     to text descriptions. Here, 2, 4, and 6 digits correspond to chapters, headings, and subheadings,
     with an increasing level of granularity. 
     
     Args:
-        redshift_instance (RedshiftClass): An instance of Redshift Class
+        redshift (RedshiftClass): An instance of Redshift Class
     
     Returns:
         dict[str:str]: A dictionary mapping between HS product codes (in string form) and
@@ -126,7 +126,7 @@ def get_product_table(redshift_instance):
     
     #query for products that appear in the Hitachi dataset and their descriptions
     query = f"select * from hs_category_description"
-    df_products = redshift_instance.query_df(query)
+    df_products = redshift.query_df(query)
     row_names = ["hs6","category","sub_category","description"]
     rows = [list(df_products[row_name]) for row_name in row_names]
     
@@ -173,7 +173,3 @@ if __name__ == "__main__":
         json.dump(country_table, file, indent = 4)
 
     print("Saved out the tables to {}".format(args.dir))
-    
-    
-    
-    
