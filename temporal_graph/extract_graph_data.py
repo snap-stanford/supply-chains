@@ -21,11 +21,44 @@ import time
 import datetime
 from constants import BATTERY_RELATED_CODES
 
+def retrieve_Hitachi_table(name = "company", dir = "."):
+    """
+    Retrieves the Hitachi tables saved as .json files by the script extract_tables.py (see code for details)
+    
+    Args:
+        name (str): The specific reference table to retrieve, must be out of {company, country, product}
+        dir (str): The path to the directory the table is stored in 
+    
+    Returns:
+        dict: The retrieved reference table. Note that the company table comprises both the forward (id2company)
+        and inverse (company2id) mappings. 
+    """
+    
+    with open(os.path.join(dir, f"hitachi_{name}_mappers.json"),"r") as file:
+        table = json.load(file) 
+    return table
+
 def retrieve_timestamped_data(redshift, start_date = "2019-01-01", length_timestamps = 1, num_timestamps = 1, 
                               hs6_codes = [850760], verbose = True):
+    """
+    This will obtain a dataframe of time-stamped edges, which represent aggregated transactions between firms
+    
+    Args:
+        redshift (RedshiftClass):  An instance of Redshift Class 
+        start_date (str): The earliest date (YY-MM-DD) from which to retrieve transactions
+        length_timestamps (int): The number of days to aggregate per time stamp
+        num_timestamps (int): The number of time stamps to retrieve from logistic_data (i.e. the last day transactions
+                              will be retrieved from is length_timestamps * num_timestamps - 1 days after start_date)
+        hs6_codes (List[int]): A list of HS6 products to narrow the transactions search 
+        verbose (bool): Whether to print out status updates (to console) from the retrieval 
+        
+    Returns:
+        pd.Dataframe: A dataframe where each row is an aggregated, time-stamped transactions between a supplier and buyer,
+                       with details such as total_amount, total_weight, etc.
+    """
     
     PRIMARY_KEY = 'date, supplier_id, buyer_id, quantity, weight, price, amount, hs_code'
-    SECONDARY_KEY = 'time_stamp, hs6, supplier_id, buyer_id'
+    AGGREGATION_KEY = 'time_stamp, hs6, supplier_id, buyer_id'
     K = float(length_timestamps)
     max_day = length_timestamps * num_timestamps
     
@@ -42,7 +75,7 @@ def retrieve_timestamped_data(redshift, start_date = "2019-01-01", length_timest
     #aggregate based on the cadence specified by length_timestamps (number of days between consecutive time stamps) 
     query = f"select CEILING((time_interval + 1) / {K}) * {K} as time_stamp, SUBSTRING(hs_code, 1, 6) as hs6,\
     supplier_id, buyer_id, COUNT(*) as bill_count, SUM(quantity) as total_quantity, SUM(amount) as total_amount,\
-    SUM(weight) as total_weight from ({query}) GROUP BY {SECONDARY_KEY} ORDER BY time_stamp"
+    SUM(weight) as total_weight from ({query}) GROUP BY {AGGREGATION_KEY} ORDER BY time_stamp"
     
     date_format = '%Y-%m-%d'
     final_date = datetime.datetime.strptime(start_date, date_format) + datetime.timedelta(days = int(max_day) - 1)
@@ -62,10 +95,26 @@ if __name__ == "__main__":
     parser.add_argument('--length_timestamps', help='Number of days to aggregate per time stamp', default = 1, type = int)
     parser.add_argument('--num_timestamps', help='Number of time stamps to retrieve', default = 1, type = int)
     parser.add_argument('--fname', help='Path to the .csv file for storing the resulting data', default = None)
+    parser.add_argument('--use_titles', help = 'if provided, data uses company titles instead of IDs', action='store_true')
     args = parser.parse_args()
     
     rs = RedshiftClass(args.rs_login[0], args.rs_login[1])
     df = retrieve_timestamped_data(rs, args.start_date, args.length_timestamps, args.num_timestamps,
                                   hs6_codes = BATTERY_RELATED_CODES)
+    
+    #create the company ID -> name mapper, and replace the IDs in the dataframe with company titles
+    if (args.use_titles == True):
+        id2company = retrieve_Hitachi_table(name = "company")["id2company"]
+        company_ids = list(id2company.keys())
+        df_companies = pd.DataFrame.from_dict({"company_id": company_ids,
+                                       "company_t": [id2company[id] for id in company_ids]})
+        
+        #replace the company supplier IDs
+        df = pd.merge(df, df_companies, left_on = "supplier_id", right_on = "company_id", how = "left")
+        df = df.rename(columns = {"company_t": "supplier_t"}).drop(columns = {"company_id","supplier_id"})
+        #replace the company buyer IDs
+        df = pd.merge(df, df_companies, left_on = "buyer_id", right_on = "company_id", how = "left")
+        df = df.rename(columns = {"company_t": "buyer_t"}).drop(columns = {"company_id","buyer_id"})
+    
     print(df.head(10))
     df.to_csv(args.fname, index = False)
