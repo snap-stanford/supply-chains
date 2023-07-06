@@ -27,15 +27,18 @@ time_stamp  |  hs6  |  supplier_id           |  buyer_id   | total_amount | ...
 4.0    |  850760     |  company A |  company C | 40 | ...
 6.0     |  850450  |  company B |  company A | 50 | ...
 
-The `time_stamp` column indicates the row includes transactions between `{time_stamp} - {length_timestamps}` and `{time_stamp}-1` days <b>after</b> the `{start_date}`, inclusive. As a <b>note</b>, for now, the script only gathers data for battery-related products due to scale. To alchemize the company IDs (e.g. supplier_id, buyer_id) into their company names, add the `--use_titles` flag to the above command. 
+The `time_stamp` column indicates the row includes transactions between `{time_stamp} - {length_timestamps}` and `{time_stamp}-1` days <b>after</b> the `{start_date}`, inclusive. To alchemize the company IDs (e.g. supplier_id, buyer_id) into their company names, add the `--use_titles` flag to the above command. 
 
 ## Transform into PyG Temporal Graph
-From the .csv file saved using `extract_graph_data.py`, you'll want to use our `dataloading` module to transform it into a PyG graph. 
+From the .csv file saved using `extract_graph_data.py` (<b>make sure</b> to have included the `--use_titles` flag), you'll want to use our `dataloading` module to transform it into a PyG graph. 
 ```python
 from dataloading import SupplyChainDataset
 
 data = SupplyChainDataset("out.csv", start_date = "2022-01-01", length_timestamps = 2, metric = "total_amount")
 priorGraph, nextGraph = data.loadData(current_date = "2022-01-10", prior_days = 6, next_days = 4)
+
+for timestep, snapshot in enumerate(priorGraph): #iterate through temporal graph
+    print(type(snapshot)) #<class 'torch_geometric.data.hetero_data.HeteroData'>
 ```
 
-This will load data from the last 6 days of `2022-01-10` (Jan 5th to Jan 10th) and the next 4 days (Jan 11th to 14th) into `priorGraph` and `nextGraph`, respectively. These are `DynamicHeteroGraphTemporalSignal` objects from PyG Temporal, with firms as nodes and product-heterogeneous, dynamic edges that are time-stamped. See the source code at `dataloading.py` for details.
+This will load data from the last 6 days of `2022-01-10` (Jan 5th to Jan 10th) and the next 4 days (Jan 11th to 14th) into `priorGraph` and `nextGraph`, respectively. These are `DynamicHeteroGraphTemporalSignal` iterator objects from PyG Temporal, with firms as nodes and product-heterogeneous, dynamic edges that are time-stamped. Each time iteration corresponds to a PyG `HeteroData` graph. See the source code at `dataloading.py` for details.
