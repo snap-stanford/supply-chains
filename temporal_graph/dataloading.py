@@ -8,12 +8,7 @@ import numpy as np
 from torch_geometric_temporal import DynamicHeteroGraphTemporalSignal
 import pandas as pd
 import networkx as nx
-
-def build_transaction_network():
-    """
-    TODO: create a NetworkX MultiDiGraph for graph parsing and general exploration / visualisation
-    """
-    pass 
+from scipy.sparse import csr_matrix
 
 def get_days_between(date_1, date_2, date_format = "%Y-%m-%d"):
     """
@@ -72,9 +67,9 @@ class SupplyChainDataset(object):
         for time_stamp, supplier, buyer, product, amount in zip(*rows):
             time_stamp = int(time_stamp)
             product = str(int(product)).zfill(6)
-            #directed edge from supplier to buyer 
+            #directed edge from supplier to buyer (flow of material), will create the
+            #edge from buyer to supplier (flow of cash) on the spot in getTemporalGraph()
             material_edge = [self.company_to_nodeID[supplier], self.company_to_nodeID[buyer]]
-            #cash_edge = [self.company_to_nodeID[buyer], self.company_to_nodeID[supplier]]
             if (time_stamp not in self.edge_index_dict):
                 self.edge_index_dict[time_stamp] = {product: [material_edge]}
                 self.edge_weight_dict[time_stamp] = {product: [amount]}
@@ -98,13 +93,13 @@ class SupplyChainDataset(object):
         
         node_input_rows = [list(df_node_input[row]) for row in ["time_stamp",input_entity,metric]]
         node_output_rows = [list(df_node_output[row]) for row in ["time_stamp",output_entity,metric]]
-        self.node_features = {timestamp: np.zeros(shape = (self.num_nodes_total, 2)) for timestamp in self.prevalent_timestamps}
+        self.node_targets = {timestamp: np.zeros((self.num_nodes_total, 2)) for timestamp in self.prevalent_timestamps}
         for time_stamp, firm, metric in zip(*node_input_rows):
-            self.node_features[time_stamp][self.company_to_nodeID[firm]][0] = metric 
+            self.node_targets[time_stamp][self.company_to_nodeID[firm],0] = metric 
         for time_stamp, firm, metric in zip(*node_output_rows):
-            self.node_features[time_stamp][self.company_to_nodeID[firm]][1] = metric 
-            #dev note: change to sparse matrix implementation for larger data
-    
+            self.node_targets[time_stamp][self.company_to_nodeID[firm],1] = metric 
+        self.node_targets = {timestamp: csr_matrix(self.node_targets[timestamp]) for timestamp in self.prevalent_timestamps}
+        
     def get_edge_index_dict(self,time_stamp):
         if (time_stamp not in self.prevalent_timestamps):
             return {"firm": None}
@@ -136,7 +131,7 @@ class SupplyChainDataset(object):
         edge_index_dicts = [self.get_edge_index_dict(ts) for ts in time_stamps]
         edge_weight_dicts = [self.get_edge_weight_dict(ts) for ts in time_stamps]
         feature_dicts = [{"firm": None} for _ in range(len(time_stamps))] #not clear what node / firm features should be atm
-        target_dicts = [{"firm":self.node_features[ts].copy()} if ts in self.prevalent_timestamps else None for ts in time_stamps ]
+        target_dicts = [{"firm":self.node_targets[ts].todense().copy()} if ts in self.prevalent_timestamps else None for ts in time_stamps ]
         date_ranges = [{"firm": np.array(self.get_date_range(ts))} for ts in time_stamps]
         
         tempGraph = DynamicHeteroGraphTemporalSignal(edge_index_dicts = edge_index_dicts,
@@ -184,7 +179,7 @@ if __name__ == "__main__":
     
     obj = SupplyChainDataset("out.csv", "2022-01-01", 1, "total_amount")
     print(f"Total Firms: {obj.num_nodes_total}\nTotal Time-Stamped Edges: {obj.num_edges_total}")
-    priorGraph, nextGraph = obj.loadData(current_date = "2022-01-10", prior_days = 2, next_days = 3)
+    priorGraph, nextGraph = obj.loadData(current_date = "2022-01-10", prior_days = 5, next_days = 10)
     
 
 
