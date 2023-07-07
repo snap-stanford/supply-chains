@@ -28,7 +28,8 @@ def get_forward_date(date_1, num_days_ahead, date_format = "%Y-%m-%d"):
     
 class SupplyChainDataset(object):
     
-    def __init__(self, edges_csv_file, start_date, length_timestamps = 1, metric = "total_amount"):
+    def __init__(self, edges_csv_file, start_date, length_timestamps = 1, 
+                 metric = "total_amount", dual_edge = False, context_size = 5):
         """
         Constructor method for the temporal Supply Chain dataset, which formats the .csv from 
         extract_graph_data.py into graph-based data structures from torch_geometric_temporal
@@ -39,6 +40,10 @@ class SupplyChainDataset(object):
             length_timestamps (int): number of days aggregated per time stamp
             metric (str): the metric (out of total_amount, total_quantity, bill_count, total_weight) 
                           to assign to each edge as its "weight"
+            dual_edge (bool): By default, edges are drawn from supplier -> buyer (flow of material). If True, 
+                          this will also draw reverse edges from buyer -> supplier (flow of cash). 
+            context_size (int): Number of past days to average firm inputs/outputs over to create node features
+                              for each time_stamp. 
         
         Returns:
             None
@@ -48,6 +53,8 @@ class SupplyChainDataset(object):
             raise ValueError(f"Metric must be {all_metrics}")
         self.start_date = start_date
         self.length_ts = length_timestamps
+        self.dual_edge = dual_edge
+        self.context_size = context_size
             
         #read the dataframe and excise missing supplier & buyer nodes, as well as values
         df = pd.read_csv(edges_csv_file)
@@ -67,8 +74,7 @@ class SupplyChainDataset(object):
         for time_stamp, supplier, buyer, product, amount in zip(*rows):
             time_stamp = int(time_stamp)
             product = str(int(product)).zfill(6)
-            #directed edge from supplier to buyer (flow of material), will create the
-            #edge from buyer to supplier (flow of cash) on the spot in getTemporalGraph()
+            #directed edge from supplier to buyer (flow of material)
             material_edge = [self.company_to_nodeID[supplier], self.company_to_nodeID[buyer]]
             if (time_stamp not in self.edge_index_dict):
                 self.edge_index_dict[time_stamp] = {product: [material_edge]}
@@ -88,6 +94,7 @@ class SupplyChainDataset(object):
         #input: supplier gets amount, buyer gets product, output: supplier loses amount, buyer loses product
         input_entity = "supplier_t" if metric == "total_amount" else "buyer_t" 
         output_entity = "buyer_t" if metric == "total_amount" else "supplier_t"
+        
         df_node_input = df.groupby(by = ["time_stamp", input_entity]).sum(numeric_only = True).reset_index()
         df_node_output = df.groupby(by = ["time_stamp", output_entity]).sum(numeric_only = True).reset_index()
         
@@ -99,38 +106,73 @@ class SupplyChainDataset(object):
         for time_stamp, firm, metric in zip(*node_output_rows):
             self.node_targets[time_stamp][self.company_to_nodeID[firm],1] = metric 
         self.node_targets = {timestamp: csr_matrix(self.node_targets[timestamp]) for timestamp in self.prevalent_timestamps}
+        #obtain the node features using a past sliding window of firm inputs/outputs
+        self.assemble_sliding_window()
         
     def get_edge_index_dict(self,time_stamp):
         if (time_stamp not in self.prevalent_timestamps):
             return {"firm": None}
         edges_dict = self.edge_index_dict[time_stamp]
-        unique_products = list(edges_dict.keys()) #different edge relation types
-        return {("firm",product,"firm"): np.transpose(np.array(edges_dict[product])) for product in unique_products}
+        unique_products = list(edges_dict.keys()) #different products that delineate edge relations
+        #constructs forward edges from supplier to buyer (flow of material)
+        index_dict = {("firm",(product,"material"),"firm"): np.transpose(
+            np.array(edges_dict[product])) for product in unique_products}
+        #constructs reverse edges from buyer to supplier (flow of cash)
+        if self.dual_edge == True: 
+            dual_index_dict = {("firm",(product, "cash"), "firm"): np.flip(np.transpose(
+                np.array(edges_dict[product])), axis = 0).copy() for product in unique_products}
+            index_dict.update(dual_index_dict)
+        return index_dict
     
     def get_edge_weight_dict(self,time_stamp):
         if (time_stamp not in self.prevalent_timestamps):
             return {"firm": None}
         weight_dict = self.edge_weight_dict[time_stamp]
-        unique_products = list(weight_dict.keys()) #different edge relation types
-        return {("firm",product,"firm"): np.array(weight_dict[product]) for product in unique_products}
-    
+        unique_products = list(weight_dict.keys()) #different products that delineate edge relations
+        edge_weight_dict = {("firm",(product,"material"),"firm"): np.array(
+            weight_dict[product]) for product in unique_products}
+        if self.dual_edge == True: 
+            dual_index_dict = {("firm",(product, "cash"), "firm"): np.array(
+                weight_dict[product]) for product in unique_products}
+            edge_weight_dict.update(dual_index_dict)
+        return edge_weight_dict
+        
     def get_date_range(self,time_stamp):
         lower_date = get_forward_date(self.start_date, time_stamp - self.length_ts)
         upper_date = get_forward_date(self.start_date, time_stamp - 1)
         return [lower_date, upper_date]
     
+    def assemble_sliding_window(self):
+        #calculates sliding window of past <self.context_size> days, averaging input/output for each firm 
+        #stores the averaged values in np.array self.node_IO_table, accessed by time_stamp indices
+        K = self.context_size
+        self.node_IO_table = np.zeros(shape = (max(self.prevalent_timestamps), self.num_nodes_total, 2))
+        
+        rolling_sum = np.zeros(shape = (self.num_nodes_total, 2))
+        for timestamp in range(1, max(self.prevalent_timestamps) + 1):
+            #for timestamp t, average each firm's values between timestamps t - K and t - 1 
+            if (timestamp - 1 in self.prevalent_timestamps):
+                rolling_sum += self.node_targets[timestamp - 1].todense()
+            if (timestamp - K - 1 in self.prevalent_timestamps):
+                rolling_sum -= self.node_targets[timestamp - K - 1].todense()
+                
+            #divide by the number of days the amounts are averaged over
+            self.node_IO_table[timestamp - 1] = rolling_sum / min(K, timestamp - 1) if timestamp > 1 else 0
+            
     def getTemporalGraph(self, time_stamps):
         """
         given a list of time_stamps, produces a PyG temporal graph covering time-stamped transaction edges 
         between node firms. Here, edge weights are the metric (e.g. total_amount, bill_count) given
-        to the constructor method, and node targets are the total input/output of each firm at each time. 
+        to the constructor method, node targets are the total input/output of each firm at each time. For now,
+        node features are the average input/output of the past <self.context_window> days of each firm. 
+        
         The different edge relations correspond to different HS6 products (see get_edge_index_dict above),
         and date_ranges corresponds to the interval of dates aggregated for each time_stamp. Use 
         self.company_to_nodeID and self.nodeID_to_company to convert between node indices and firm names.
         """
         edge_index_dicts = [self.get_edge_index_dict(ts) for ts in time_stamps]
         edge_weight_dicts = [self.get_edge_weight_dict(ts) for ts in time_stamps]
-        feature_dicts = [{"firm": None} for _ in range(len(time_stamps))] #not clear what node / firm features should be atm
+        feature_dicts = [{"firm":self.node_IO_table[ts - 1].copy()} if (ts > 1 and ts <= max(self.prevalent_timestamps)) else None for ts in time_stamps]
         target_dicts = [{"firm":self.node_targets[ts].todense().copy()} if ts in self.prevalent_timestamps else None for ts in time_stamps ]
         date_ranges = [{"firm": np.array(self.get_date_range(ts))} for ts in time_stamps]
         
@@ -160,6 +202,9 @@ class SupplyChainDataset(object):
                     for transactions occurring up to (prior_days - 1) days before the current_date (i.e. current_date is included)                       
             nextGraph (DynamicHeteroGraphTemporalSignal): a temporal Graph of product-stratified edges between firm nodes 
                     for transactions occurring up to next_days after the current_date (i.e. current_date is NOT included)
+            
+            **Note that the edge keys are a tuple of the form ("firm", (product, flow direction), "firm"), where flow direction 
+            is "material" for supplier -> buyer and "cash" for buyer -> supplier 
         """
         days_after_start = get_days_between(self.start_date, current_date)
         prior_earliest_ts = np.ceil((days_after_start - prior_days + 1 + self.length_ts) / self.length_ts) * self.length_ts
@@ -178,8 +223,7 @@ class SupplyChainDataset(object):
 if __name__ == "__main__":
     
     obj = SupplyChainDataset("out.csv", "2022-01-01", 1, "total_amount")
-    print(f"Total Firms: {obj.num_nodes_total}\nTotal Time-Stamped Edges: {obj.num_edges_total}")
+    print(f"Total Firms: {obj.num_nodes_total}\nTotal Time-Stamped Supplier \u2192 Buyer Edges: {obj.num_edges_total}")
     priorGraph, nextGraph = obj.loadData(current_date = "2022-01-10", prior_days = 5, next_days = 10)
-    
 
 
