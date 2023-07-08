@@ -57,7 +57,7 @@ of textile materials (other than wool or fine animal hair, cotton
 or man-made fibres), knitted or crocheted"""
 ```
 
-### Hitachi Dataset
+### Hitachi Dataset (index_hs6)
 For Hitachi, one would run an analagous script, although the `year` is provided differently (since the loader gives data from all years simultaneously). Note that both datasets may have certain products or entities missing.
 
 ```python
@@ -77,3 +77,13 @@ print(trade_flows_2020[(exporter_country,product_code)])
 ```
 
 The above retrieves the values for flexible iron or steel tubing (hs6 code = `830710`) exported by the United States in `2020`. 
+
+# Hitachi Dataset (logistic_data)
+To acquire Hitachi values from the `logistic_data` (instead of `index_hs6` above), one can run: 
+```python
+import read_logistic
+
+
+```
+
+address scale limitations for dyad aggregations
