@@ -72,7 +72,7 @@ def retrieve_timestamped_data(redshift, start_date = "2019-01-01", length_timest
     BETWEEN 0 AND {max_day-1} GROUP BY {PRIMARY_KEY}, time_interval"
     
     #aggregate based on the cadence specified by length_timestamps (number of days between consecutive time stamps) 
-    query = f"select CEILING((time_interval + 1) / {K}) * {length_timestamps} as time_stamp, SUBSTRING(hs_code, 1, 6) as hs6,\
+    query = f"select CEILING((time_interval + 1) / {K}) - 1 as time_stamp, SUBSTRING(hs_code, 1, 6) as hs6,\
     supplier_id, buyer_id, COUNT(*) as bill_count, SUM(quantity) as total_quantity, SUM(amount) as total_amount,\
     SUM(weight) as total_weight from ({query}) GROUP BY {AGGREGATION_KEY} ORDER BY time_stamp"
     
