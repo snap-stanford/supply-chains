@@ -15,12 +15,6 @@ geo_dict = {'ARGENTINA': 32,
  'BRAZIL': 76,
  'CANADA': 124,
  'CHILE': 152,
-  #this is an accordance with the dataset convention, and not 
-  #an indication of my personal views, similar to any
-  #other omissions and labellings throughout 
- 'CHINA HONGKONG': 156,
- 'CHINA MAINLAND': 156,
- 'CHINA TAIWAN': 156,
  'COLOMBIA': 170,
  'COSTA RICA': 188,
  'CZECHIA': 203,
