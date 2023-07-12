@@ -5,11 +5,13 @@ Graph data structures from the PyTorch Geometric library (see https://pytorch-ge
 
 import datetime
 import numpy as np
-from torch_geometric_temporal import DynamicHeteroGraphTemporalSignal
+from torch_geometric_temporal import DynamicHeteroGraphTemporalSignal, DynamicGraphTemporalSignal
 import pandas as pd
 import networkx as nx
 from scipy.sparse import csr_matrix, lil_matrix
 import time
+import torch
+import os 
 
 def get_days_between(date_1, date_2, date_format = "%Y-%m-%d"):
     """
@@ -26,7 +28,7 @@ def get_forward_date(date_1, num_days_ahead, date_format = "%Y-%m-%d"):
     """
     date_2 = datetime.datetime.strptime(date_1, date_format) + datetime.timedelta(days = num_days_ahead)
     return date_2.strftime(date_format)
-    
+
 def node_normalize(temporal_node_data, norms = None, epsilon = 10**(-10)):
     """
     *temporal_node_data is of the shape [some number of timestamps, num_nodes, 2]
@@ -34,18 +36,20 @@ def node_normalize(temporal_node_data, norms = None, epsilon = 10**(-10)):
     corresponding values each have shape [num_nodes, 2]
     """
     if (norms == None): return temporal_node_data
+    #winsorize the data 
+
     return (temporal_node_data - norms["mean"]) / (norms["std"] + epsilon)
+    #return (temporal_node_data - np.min(temporal_node_data, axis = (0,1))) / (np.max(temporal_node_data, axis = (0,1)) - np.min(temporal_node_data, axis = (0,1)))
 
 def node_unnormalize(normalized_node_data, norms = None, epsilon = 10**(-10)):
     """ analagous parameter recommendations as normalize() above """
     if (norms == None): return normalized_node_data
     return normalized_node_data * (norms["std"] + epsilon) + norms["mean"]
 
-
 class SupplyChainDataset(object):
     
     def __init__(self, csv_file, start_date, length_timestamps = 1, 
-                 metric = "total_amount", dual_edge = False, lags = 5):
+                 metric = "total_amount", edge_type = "material", lags = 5):
         """
         Constructor method for the temporal Supply Chain dataset, which formats the .csv from 
         extract_graph_data.py into graph-based data structures from torch_geometric_temporal
@@ -56,19 +60,22 @@ class SupplyChainDataset(object):
             length_timestamps (int): number of days aggregated per time stamp
             metric (str): the metric (out of total_amount, total_quantity, bill_count, total_weight) 
                           to assign to each edge as its "weight"
-            dual_edge (bool): By default, edges are drawn from supplier -> buyer (flow of material). If True, 
-                          this will also draw reverse edges from buyer -> supplier (flow of cash). 
-            lags (int): Number of past time_stamps to use for predicting the next time_stamp 
+            edge_type (str): Out of {'material', 'cash', 'both'}. By default, edges are drawn from supplier -> buyer (flow of 
+            material). Reverse edges from buyer -> supplier (flow of cash) can also be drawn. 
+                        
+            lags (int): Number of past time_stamps to use for predicting the next time_stamp  
 
         Returns:
             None
         """
         all_metrics = {"total_amount", "total_quantity", "bill_count", "total_weight"}
         if metric not in all_metrics:
-            raise ValueError(f"Metric must be {all_metrics}")
+            raise ValueError(f"metric must be in {all_metrics}")
         self.start_date = start_date
         self.length_ts = length_timestamps
-        self.dual_edge = dual_edge
+        if (edge_type not in ["material","cash","both"]):
+            raise ValueError("edge_type must be in {'material','cash','both'}")
+        self.edge_type = edge_type
         self.lags = lags
         
         #read the dataframe and excise missing supplier & buyer nodes, as well as values
@@ -80,32 +87,39 @@ class SupplyChainDataset(object):
         self.prevalent_timestamps = set(df["time_stamp"])
         self.max_ts = max(self.prevalent_timestamps)
         
-        #establish nodes (using an ID dictionary) and heterogeneous edge information (using two parallel
-        #dictionaries storing the edge indices and metric / weights, respectively)
+        #establish node IDs by mapping firms to a unique indices, and obtain edge and node features
         self.company_to_nodeID = {company_t: node_id for node_id, company_t in enumerate(companies)}
         self.nodeID_to_company = {value:key for key,value in self.company_to_nodeID.items()}
+        self.create_edge_attributes(df, metric)
+        self.create_node_features(df, metric)
+        
+    def create_edge_attributes(self, df, metric):
+        """procure edge information by using two parallel dictionaries to store edge indices and weights"""
         self.edge_index_dict = {} 
         self.edge_weight_dict = {}
-        rows = [list(df[name]) for name in row_names] #for index, row in tqdm(df.iterrows()): 
+        row_names = ["time_stamp","supplier_t","buyer_t","hs6", metric]
+        rows = [list(df[name]) for name in row_names]
         for time_stamp, supplier, buyer, product, amount in zip(*rows):
             time_stamp = int(time_stamp)
             product = str(int(product)).zfill(6)
+            
             #directed edge from supplier to buyer (flow of material)
-            material_edge = [self.company_to_nodeID[supplier], self.company_to_nodeID[buyer]]
+            edge_material_flow = [self.company_to_nodeID[supplier], self.company_to_nodeID[buyer]]
             if (time_stamp not in self.edge_index_dict):
-                self.edge_index_dict[time_stamp] = {product: [material_edge]}
+                self.edge_index_dict[time_stamp] = {product: [edge_material_flow]}
                 self.edge_weight_dict[time_stamp] = {product: [amount]}   
             
             elif (product not in self.edge_index_dict[time_stamp]):
-                self.edge_index_dict[time_stamp][product] = [material_edge]
+                self.edge_index_dict[time_stamp][product] = [edge_material_flow]
                 self.edge_weight_dict[time_stamp][product] = [amount]
             
             else: 
-                self.edge_index_dict[time_stamp][product].append(material_edge)
+                self.edge_index_dict[time_stamp][product].append(edge_material_flow)
                 self.edge_weight_dict[time_stamp][product].append(amount)
         
-        #get total input/output for each node at each timestep 
-        #input: supplier gets amount, buyer gets product, output: supplier loses amount, buyer loses product
+    def create_node_features(self, df, metric):
+        """get total input/output for each node at each timestep 
+        input: supplier gets amount, buyer gets product, output: supplier loses amount, buyer loses product"""
         input_entity = "supplier_t" if metric == "total_amount" else "buyer_t" 
         output_entity = "buyer_t" if metric == "total_amount" else "supplier_t"
         
@@ -119,21 +133,22 @@ class SupplyChainDataset(object):
             self.node_features[int(time_stamp), self.company_to_nodeID[firm], 0] = metric
         for time_stamp, firm, metric in zip(*node_output_rows):
             self.node_features[int(time_stamp), self.company_to_nodeID[firm], 1] = metric
-            
+              
     def get_edge_index_dict(self, time_stamp):
         if (time_stamp not in self.prevalent_timestamps):
             return None 
         edges_dict = self.edge_index_dict[time_stamp]
         unique_products = list(edges_dict.keys())
+        index_dict = {}
         #constructs forward edges from supplier to buyer (flow of material)
-        index_dict = {("firm",(product,"material"),"firm"): np.transpose(
-            np.array(edges_dict[product])) for product in unique_products}
+        if (self.edge_type == "material" or self.edge_type == "both"):
+            index_dict.update({("firm",(product,"material"),"firm"): np.transpose(
+                np.array(edges_dict[product])) for product in unique_products})
         
         #constructs reverse edges from buyer to supplier (flow of cash)
-        if self.dual_edge == True: 
-            dual_index_dict = {("firm",(product, "cash"), "firm"): np.flip(np.transpose(
-                np.array(edges_dict[product])), axis = 0).copy() for product in unique_products}
-            index_dict.update(dual_index_dict)
+        if (self.edge_type == "cash" or self.edge_type == "both"):
+            index_dict.update({("firm",(product, "cash"), "firm"): np.flip(np.transpose(
+                np.array(edges_dict[product])), axis = 0).copy() for product in unique_products})
         return index_dict
 
     def get_edge_weight_dict(self, time_stamp):
@@ -141,13 +156,16 @@ class SupplyChainDataset(object):
             return None
         weight_dict = self.edge_weight_dict[time_stamp]
         unique_products = list(weight_dict.keys()) #different products that delineate edge relations
-        edge_weight_dict = {("firm",(product,"material"),"firm"): np.array(
-            weight_dict[product]) for product in unique_products}
-        
-        if self.dual_edge == True: 
-            dual_index_dict = {("firm",(product, "cash"), "firm"): np.array(
-                weight_dict[product]) for product in unique_products}
-            edge_weight_dict.update(dual_index_dict)
+        edge_weight_dict = {}
+        #assigns weight attributes to forward edges from supplier to buyer (flow of material)
+        if (self.edge_type == "material" or self.edge_type == "both"):
+            edge_weight_dict.update({("firm",(product,"material"),"firm"): np.array(
+                weight_dict[product]) for product in unique_products})
+                                    
+        #assigns weight attributes to reverse edges from buyer to supplier (flow of cash)
+        if (self.edge_type == "cash" or self.edge_type == "both"):
+            edge_weight_dict.update({("firm",(product, "cash"), "firm"): np.array(
+                weight_dict[product]) for product in unique_products})
         return edge_weight_dict
     
     def get_date_range(self,time_stamp):
@@ -162,21 +180,20 @@ class SupplyChainDataset(object):
         """
         days_after_start = get_days_between(self.start_date, current_date)
         prior_earliest_ts = np.ceil((days_after_start - prior_days + 1) / self.length_ts)
-        #prior_earliest_ts = np.ceil((days_after_start - prior_days + 1 + self.length_ts) / self.length_ts) - 1
         prior_latest_ts = (days_after_start + 1) // self.length_ts - 1
         prior_timestamps = list(range(int(prior_earliest_ts), int(prior_latest_ts) + 1, 1))
         
-        #next_earliest_ts = np.ceil((days_after_start + 1 + self.length_ts) / self.length_ts) - 1
         next_earliest_ts = np.ceil((days_after_start + 1) / self.length_ts)
         next_latest_ts = (days_after_start + 1 + next_days) // self.length_ts - 1
         next_timestamps = list(range(int(next_earliest_ts), int(next_latest_ts) + 1, 1))
         return prior_timestamps, next_timestamps
     
     def get_node_norms(self, time_stamps):
+        """ obtain mean and standard deviation of raw node features over the time dimension """
         if (len(time_stamps) <= 1):
             return None 
         node_features = self.node_features[time_stamps]
-        mean, std = np.mean(node_features, axis = 0), np.std(node_features, axis = 0)
+        mean, std = np.mean(node_features), np.std(node_features)
         return {"mean": mean, "std": std}
     
     def getTemporalGraph(self, time_stamps, norms = None):
@@ -195,7 +212,6 @@ class SupplyChainDataset(object):
         edge_index_dicts = [self.get_edge_index_dict(ts - self.lags) for ts in time_stamps]
         edge_weight_dicts = [self.get_edge_weight_dict(ts - self.lags) for ts in time_stamps]
         
-        #TODO: rework these to accomodate backward lag and normalizations
         feature_dicts = [{"firm": node_normalize(self.node_features[ts - self.lags: ts], norms) if (
             self.lags <= ts <= self.max_ts) else None} for ts in time_stamps]
         target_dicts = [{"firm": node_normalize(self.node_features[ts], norms) if (
@@ -237,12 +253,94 @@ class SupplyChainDataset(object):
         nextGraph = self.getTemporalGraph(next_timestamps, norms)
         return priorGraph, nextGraph, norms
     
+#revise based on refactored class (use homogenuous supplier -> buyer edges)
+class FirmDataset(SupplyChainDataset):
+    def __init__(self, csv_file, start_date, length_timestamps = 1, 
+                 metric = "total_amount", lags = 5):
+        """
+        same parameters as ancestor class (SupplyChainDataset). A modified version that aggregates
+        transactions between firms over all products, i.e. no product stratification for edges. 
+        """
+        all_metrics = {"total_amount", "total_quantity", "bill_count", "total_weight"}
+        if metric not in all_metrics:
+            raise ValueError(f"Metric must be {all_metrics}")
+        self.start_date = start_date
+        self.length_ts = length_timestamps
+        self.lags = lags
+        #for edge_type, if metric == total_amount, then draw buyer -> supplier, otherwise supplier -> buyer 
+        self.edge_type = "cash" if metric == "total_amount" else "material"
+        
+        #read the dataframe and excise missing supplier & buyer nodes, as well as values
+        df = pd.read_csv(csv_file)
+        row_names = ["time_stamp","supplier_t","buyer_t", metric]
+        df = df[row_names][(~df[metric].isna()) & (df[metric] > 0) & (df["supplier_t"] != "") & (df["buyer_t"] != "")]
+        
+        #aggregate over all products 
+        df = df.groupby(by = ["time_stamp","supplier_t","buyer_t"]).sum().reset_index()
+        companies = list(set(df["supplier_t"]).union(set(df["buyer_t"])))
+        self.num_nodes = len(companies)
+        self.prevalent_timestamps = set(df["time_stamp"])
+        self.max_ts = max(self.prevalent_timestamps)
+        self.company_to_nodeID = {company_t: node_id for node_id, company_t in enumerate(companies)}
+        self.nodeID_to_company = {value:key for key,value in self.company_to_nodeID.items()}
+        
+        self.create_edge_attributes(df, metric)
+        self.create_node_features(df, metric)
+        self.node_features = np.log(self.node_features + 1)
+        self.edge_weight_dict = {key: np.log(np.array(value) + 1) for key, value in self.edge_weight_dict.items()}
+    
+    def create_edge_attributes(self, df, metric):
+        self.edge_index_dict = {}
+        self.edge_weight_dict = {}
+        row_names = ["time_stamp","supplier_t","buyer_t", metric]
+        rows = [list(df[name]) for name in row_names]
+        for time_stamp, supplier, buyer, amount in zip(*rows):
+            time_stamp = int(time_stamp)
+            if (self.edge_type == "cash"):
+                edge_transactions = [self.company_to_nodeID[buyer], self.company_to_nodeID[supplier]] 
+            else:
+                edge_transactions = [self.company_to_nodeID[supplier], self.company_to_nodeID[buyer]]
+            if (time_stamp not in self.edge_index_dict):
+                self.edge_index_dict[time_stamp] = [edge_transactions]
+                self.edge_weight_dict[time_stamp] = [amount]
+            else:
+                self.edge_index_dict[time_stamp].append(edge_transactions)
+                self.edge_weight_dict[time_stamp].append(amount)
+            
+    #override ancestor class to use homogeneous edges
+    def get_edge_index_dict(self, time_stamp):
+        if (time_stamp not in self.prevalent_timestamps):
+            return None
+        return np.array(self.edge_index_dict[time_stamp]).T
+        
+    #override ancestor class to use homogeneous edges
+    def get_edge_weight_dict(self, time_stamp):
+        if (time_stamp not in self.prevalent_timestamps):
+            return None
+        return np.array(self.edge_weight_dict[time_stamp])
+    
+    #override ancestor class to use DynamicGraphTemporalSignal
+    def getTemporalGraph(self, time_stamps, norms = None):
+        date_ranges = [np.array(self.get_date_range(ts)) for ts in time_stamps]
+        edge_indices = [self.get_edge_index_dict(ts - self.lags) for ts in time_stamps]
+        edge_weights = [self.get_edge_weight_dict(ts - self.lags) for ts in time_stamps]
+        features = [node_normalize(self.node_features[ts - self.lags: ts,:], norms).transpose(1,0,2).reshape(-1,10) if (
+            self.lags <= ts <= self.max_ts) else None for ts in time_stamps]
+        targets = [node_normalize(self.node_features[ts, :], norms) if (
+            0 <= ts <= self.max_ts) else None for ts in time_stamps]
+         
+        tempGraph = DynamicGraphTemporalSignal(edge_indices = edge_indices,
+                                               edge_weights = edge_weights,
+                                               features = features, 
+                                               targets = targets,
+                                              date_ranges = date_ranges)
+        return tempGraph
     
 if __name__ == "__main__":
     """command line testing"""
     start_t = time.time()
     fname = "./storage/daily_transactions_2021.csv"
-    sc = SupplyChainDataset(fname, start_date = "2021-01-01", dual_edge = False, lags = 5)
+    sc = SupplyChainDataset(fname, start_date = "2021-01-01", edge_type = "material", lags = 5)
     end_t = time.time()
     print(f"Processed dataset at {fname} in {end_t - start_t:.2f} seconds.")
     print(f"Total Firms: {sc.num_nodes}\nTotal Time-Stamped Supplier \u2192 Buyer Edges: {sc.num_edges}")
