@@ -1,0 +1,25 @@
+program: tgn.py
+method: grid
+metric:
+  goal: maximize
+  name: perf_metric_test
+parameters:
+  lr:
+    values: [5e-3, 1e-4, 1e-5]
+  bs:
+    values: [100, 200]
+  mem_dim:
+    values: [50, 100, 200]
+  time_dim:
+    values: [50, 100, 200]
+  emb_dim:
+    values: [50, 100, 200]
+command:
+  - python
+  - ${program}
+  - "--num_epoch"
+  - "100"
+  - "--wandb True"
+project: curis-2023-tgb
+name: 20230715-tgn-sweep
+entity: zhiyinl

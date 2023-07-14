@@ -1,12 +1,12 @@
 """
-Dynamic Link Prediction with a TGN model with Early Stopping
+Link Prediction with a TGN model with Early Stopping
 Reference: 
     - https://github.com/pyg-team/pytorch_geometric/blob/master/examples/tgn.py
 
 command for an example run:
     python examples/linkproppred/tgbl-wiki/tgn.py --data "tgbl-wiki" --num_run 1 --seed 1
 """
-
+import wandb
 import math
 import timeit
 
@@ -204,6 +204,7 @@ TOLERANCE = args.tolerance
 PATIENCE = args.patience
 NUM_RUNS = args.num_run
 NUM_NEIGHBORS = 10
+WANDB = args.wandb
 
 
 MODEL_NAME = 'TGN'
@@ -284,6 +285,35 @@ Path(results_path).mkdir(parents=True, exist_ok=True)
 results_filename = f'{results_path}/{MODEL_NAME}_{DATA}_results.json'
 
 for run_idx in range(NUM_RUNS):
+    # start a new wandb run to track this script
+    if WANDB:
+        wandb.init(
+            # set the wandb project where this run will be logged
+            project="curis-2023-tgb",
+            entity="zhiyinl",
+            resume="allow",
+
+            # track hyperparameters and run metadata
+            config={
+            "dataset": DATA,
+            "learning_rate": LR,
+            "batch_size": BATCH_SIZE,
+            "k_value": K_VALUE,
+            "num_epoch": NUM_EPOCH,
+            "seed": SEED,
+            "memory_dimension": MEM_DIM,
+            "time_dimension": TIME_DIM,
+            "embedding_dimension": EMB_DIM,
+            "tolerance": TOLERANCE,
+            "patience": PATIENCE,
+            "num_runs": NUM_RUNS,
+            "num_neighbors": NUM_NEIGHBORS,
+            "model_name": MODEL_NAME,
+            "metric": metric,
+            "run_idx": run_idx,
+            }
+        )
+    
     print('-------------------------------------------------------------------------------')
     print(f"INFO: >>>>> Run: {run_idx} <<<<<")
     start_run = timeit.default_timer()
@@ -308,16 +338,26 @@ for run_idx in range(NUM_RUNS):
         # training
         start_epoch_train = timeit.default_timer()
         loss = train()
+        TIME_TRAIN = timeit.default_timer() - start_epoch_train
         print(
-            f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Training elapsed Time (s): {timeit.default_timer() - start_epoch_train: .4f}"
+            f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Training elapsed Time (s): {TIME_TRAIN: .4f}"
         )
 
         # validation
         start_val = timeit.default_timer()
         perf_metric_val = test(val_loader, neg_sampler, split_mode="val")
+        TIME_VAL = timeit.default_timer() - start_val
         print(f"\tValidation {metric}: {perf_metric_val: .4f}")
-        print(f"\tValidation: Elapsed time (s): {timeit.default_timer() - start_val: .4f}")
+        print(f"\tValidation: Elapsed time (s): {TIME_VAL: .4f}")
         val_perf_list.append(perf_metric_val)
+
+        # log metric to wandb
+        if WANDB:
+            wandb.log({"loss": loss, 
+                       "perf_metric_val": perf_metric_val, 
+                       "elapsed_time_train": TIME_TRAIN, 
+                       "elapsed_time_val": TIME_VAL
+                       })
 
         # check for early stopping
         if early_stopper.step_check(perf_metric_val, model):
@@ -341,6 +381,11 @@ for run_idx in range(NUM_RUNS):
     print(f"\tTest: {metric}: {perf_metric_test: .4f}")
     test_time = timeit.default_timer() - start_test
     print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
+    if WANDB:
+        wandb.summary["best_epoch"] = early_stopper.best_epoch
+        wandb.summary["perf_metric_test"] = perf_metric_test
+        wandb.summary["elapsed_time_test"] = test_time
+
 
     save_results({'model': MODEL_NAME,
                   'data': DATA,
@@ -355,6 +400,7 @@ for run_idx in range(NUM_RUNS):
 
     print(f"INFO: >>>>> Run: {run_idx}, elapsed time: {timeit.default_timer() - start_run: .4f} <<<<<")
     print('-------------------------------------------------------------------------------')
+    wandb.finish()
 
 print(f"Overall Elapsed Time (s): {timeit.default_timer() - start_overall: .4f}")
 print("==============================================================")

@@ -55,6 +55,7 @@ def get_args():
     parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=5)
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
+    parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
 
     try:
         args = parser.parse_args()
