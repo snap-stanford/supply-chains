@@ -6,8 +6,6 @@ metric:
 parameters:
   lr:
     values: [5e-3, 1e-4, 1e-5]
-  bs:
-    values: [100, 200]
   mem_dim:
     values: [50, 100, 200]
   time_dim:
@@ -19,7 +17,8 @@ command:
   - ${program}
   - "--num_epoch"
   - "100"
-  - "--wandb True"
+  - "--wandb"
+  - "True"
 project: curis-2023-tgb
-name: 20230715-tgn-sweep
+name: 20230716-tgn-wiki-sweep
 entity: zhiyinl
