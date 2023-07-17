@@ -24,6 +24,6 @@ do
   for ((j=0; j<NUM_AGENTS_PER_GPU; j++))
   do
     tmux new-session -d -s "gpu_${i}_${j}"
-    tmux send-keys -t "gpu_${i}_${j}" "${SCRIPT_DIR} ${WANDB_SWEEPID}" Enter
+    tmux send-keys -t "gpu_${i}_${j}" "${SCRIPT_DIR} ${WANDB_SWEEPID} ${GPU_INDICES[i]}" Enter
   done
 done

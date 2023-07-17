@@ -16,4 +16,4 @@ cd $SCRIPT_DIR
 source $SOURCE_ENV_PATH
 export PATH="/lfs/local/0/zhiyinl/anaconda3/bin:$PATH"
 export WANDB_API_KEY=$WANDB_KEY
-CUDA_VISIBLE_DEVICES=${GPU_INDICES[i]} wandb agent --project ${WANDB_PROJECT} --entity ${WANDB_USERNAME} $1
+CUDA_VISIBLE_DEVICES=$2 wandb agent --project ${WANDB_PROJECT} --entity ${WANDB_USERNAME} $1
