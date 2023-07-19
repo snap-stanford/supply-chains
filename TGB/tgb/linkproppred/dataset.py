@@ -15,6 +15,7 @@ from tgb.utils.pre_process import (
     csv_to_pd_data_sc,
     csv_to_pd_data_rc,
     load_edgelist_wiki,
+    csv_to_pd_data_hitachi,
 )
 from tgb.utils.utils import save_pkl, load_pkl
 
@@ -79,7 +80,9 @@ class LinkPropPredDataset(object):
         self._val_data = None
         self._test_data = None
 
-        self.download()
+        if (self.name != "tgbl-supplychains"):
+            self.download()
+        
         # check if the root directory exists, if not create it
         if osp.isdir(self.root):
             print("Dataset directory is ", self.root)
@@ -182,6 +185,10 @@ class LinkPropPredDataset(object):
                 df, edge_feat, node_ids = csv_to_pd_data_sc(self.meta_dict["fname"])
             elif self.name == "tgbl-wiki":
                 df, edge_feat, node_ids = load_edgelist_wiki(self.meta_dict["fname"])
+            elif self.name == "tgbl-supplychains":
+                #TODO: change this 
+                print(self.meta_dict["fname"])
+                df, edge_feat, node_ids = csv_to_pd_data_hitachi(self.meta_dict["fname"])
 
             save_pkl(edge_feat, OUT_EDGE_FEAT)
             df.to_pickle(OUT_DF)
@@ -359,7 +366,7 @@ class LinkPropPredDataset(object):
 
 
 def main():
-    name = "tgbl-comment" 
+    name = "tgbl-supplychains" 
     dataset = LinkPropPredDataset(name=name, root="datasets", preprocess=True)
 
     dataset.node_feat

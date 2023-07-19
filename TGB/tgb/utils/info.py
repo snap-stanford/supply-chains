@@ -45,6 +45,7 @@ DATA_EVAL_METRIC_DICT = {
     "tgbn-trade": "ndcg",
     "tgbn-genre": "ndcg",
     "tgbn-reddit": "ndcg",
+    "tgbl-supplychains": "mrr"
 }
 
 
