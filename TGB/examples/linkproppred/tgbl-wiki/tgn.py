@@ -1,5 +1,5 @@
 """
-Link Prediction with a TGN model with Early Stopping
+Dynamic Link Prediction with a TGN model with Early Stopping
 Reference: 
     - https://github.com/pyg-team/pytorch_geometric/blob/master/examples/tgn.py
 
@@ -191,23 +191,40 @@ start_overall = timeit.default_timer()
 args, _ = get_args()
 print("INFO: Arguments:", args)
 
-DATA = "tgbl-wiki"
-LR = args.lr
-BATCH_SIZE = args.bs
-K_VALUE = args.k_value  
-NUM_EPOCH = args.num_epoch
-SEED = args.seed
-MEM_DIM = args.mem_dim
-TIME_DIM = args.time_dim
-EMB_DIM = args.emb_dim
-TOLERANCE = args.tolerance
-PATIENCE = args.patience
-NUM_RUNS = args.num_run
-NUM_NEIGHBORS = 10
+# start a new wandb run to track this script
 WANDB = args.wandb
+if WANDB:
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="curis-2023-tgb",
+        entity="zhiyinl",
+        resume="allow",
 
+        # track hyperparameters and run metadata
+        config=args
+    )
+    config = wandb.config
 
+DATA = config.data if WANDB else args.data
+LR = config.lr if WANDB else args.lr
+BATCH_SIZE = config.bs if WANDB else args.bs
+K_VALUE = config.k_value if WANDB else args.k_value  
+NUM_EPOCH = config.num_epoch if WANDB else args.num_epoch
+SEED = config.seed if WANDB else args.seed
+MEM_DIM = config.mem_dim if WANDB else args.mem_dim
+TIME_DIM = config.time_dim if WANDB else args.time_dim
+EMB_DIM = config.emb_dim if WANDB else args.emb_dim
+TOLERANCE = config.tolerance if WANDB else args.tolerance
+PATIENCE = config.patience if WANDB else args.patience
+NUM_RUNS = config.num_run if WANDB else args.num_run
+assert (NUM_RUNS == 1)
+
+NUM_NEIGHBORS = 10
 MODEL_NAME = 'TGN'
+if WANDB:
+    wandb.summary["num_neighbors"] = NUM_NEIGHBORS
+    wandb.summary["model_name"] = MODEL_NAME
+
 # ==========
 
 # set the device
@@ -284,36 +301,7 @@ if not osp.exists(results_path):
 Path(results_path).mkdir(parents=True, exist_ok=True)
 results_filename = f'{results_path}/{MODEL_NAME}_{DATA}_results.json'
 
-for run_idx in range(NUM_RUNS):
-    # start a new wandb run to track this script
-    if WANDB:
-        wandb.init(
-            # set the wandb project where this run will be logged
-            project="curis-2023-tgb",
-            entity="zhiyinl",
-            resume="allow",
-
-            # track hyperparameters and run metadata
-            config={
-            "dataset": DATA,
-            "learning_rate": LR,
-            "batch_size": BATCH_SIZE,
-            "k_value": K_VALUE,
-            "num_epoch": NUM_EPOCH,
-            "seed": SEED,
-            "memory_dimension": MEM_DIM,
-            "time_dimension": TIME_DIM,
-            "embedding_dimension": EMB_DIM,
-            "tolerance": TOLERANCE,
-            "patience": PATIENCE,
-            "num_runs": NUM_RUNS,
-            "num_neighbors": NUM_NEIGHBORS,
-            "model_name": MODEL_NAME,
-            "metric": metric,
-            "run_idx": run_idx,
-            }
-        )
-    
+for run_idx in range(NUM_RUNS):    
     print('-------------------------------------------------------------------------------')
     print(f"INFO: >>>>> Run: {run_idx} <<<<<")
     start_run = timeit.default_timer()
@@ -382,6 +370,7 @@ for run_idx in range(NUM_RUNS):
     test_time = timeit.default_timer() - start_test
     print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
     if WANDB:
+        wandb.summary["metric"] = metric
         wandb.summary["best_epoch"] = early_stopper.best_epoch
         wandb.summary["perf_metric_test"] = perf_metric_test
         wandb.summary["elapsed_time_test"] = test_time
@@ -400,7 +389,7 @@ for run_idx in range(NUM_RUNS):
 
     print(f"INFO: >>>>> Run: {run_idx}, elapsed time: {timeit.default_timer() - start_run: .4f} <<<<<")
     print('-------------------------------------------------------------------------------')
-    wandb.finish()
 
 print(f"Overall Elapsed Time (s): {timeit.default_timer() - start_overall: .4f}")
 print("==============================================================")
+wandb.finish()

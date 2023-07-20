@@ -20,5 +20,5 @@ command:
   - "--wandb"
   - "True"
 project: curis-2023-tgb
-name: 20230716-tgn-wiki-sweep
+name: 20230720-tgn-wiki-sweep
 entity: zhiyinl

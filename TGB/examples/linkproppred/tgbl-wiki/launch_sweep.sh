@@ -1,6 +1,7 @@
 #!/bin/bash
-printf "Enter your wandb sweep id:\n"
-read WANDB_SWEEPID
+# printf "Enter your wandb sweep id:\n"
+# read WANDB_SWEEPID
+WANDB_SWEEPID="6zvc3hcl"
 
 if [[ $USER == "" ]]
 then
@@ -16,7 +17,7 @@ GPU_INDICES=(0 1)
 NUM_AGENTS_PER_GPU=2
 
 # Specify the path of script that tmux sessions run
-SCRIPT_DIR="/lfs/local/0/zhiyinl/supply-chains/TGB/examples/linkproppred/tgbl-wiki/script.sh"
+SCRIPT_DIR="/lfs/local/0/zhiyinl/supply-chains/TGB/examples/linkproppred/tgbl-wiki/script_sweep.sh"
 
 # Loop through the GPU indices and launch the jobs in separate tmux sessions
 for ((i=0; i<NUM_GPUS; i++))
