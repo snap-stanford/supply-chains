@@ -24,12 +24,17 @@ DIR = args.dir
 df_h = pd.read_csv(csv_file)
 df_h = df_h.groupby(by = ["time_stamp","supplier_t","buyer_t"]).sum(numeric_only = True).reset_index()
 
-all_companies = list(set(df_h["supplier_t"]).union(set(df_h["buyer_t"])))
+#all_companies = list(set(df_h["supplier_t"]).union(set(df_h["buyer_t"])))
+#id2company = {key: value for key,value in enumerate(all_companies)}
+#company2id = {value: key for key,value in enumerate(all_companies)}
+
+df2 = df_h.copy()
+df2 = df2[(df2["supplier_t"] != "") & (df2["buyer_t"] != "") & (~df2[metric].isna()) & (~df2["supplier_t"].isna()) & (~df2["buyer_t"].isna())]
+
+all_companies = list(set(df2["supplier_t"]).union(set(df2["buyer_t"])))
 id2company = {key: value for key,value in enumerate(all_companies)}
 company2id = {value: key for key,value in enumerate(all_companies)}
 
-df2 = df_h.copy()
-df2 = df2[(df2["supplier_t"] != "") & (df2["buyer_t"] != "") & (~df2[metric].isna())]
 df2["weight"] = [np.log10(a + 1) if logscale == True else a for a in df2[metric]]
 df2["source"] = [company2id[name] for name in df2["supplier_t"]]
 df2["target"] = [company2id[name] for name in df2["buyer_t"]]
