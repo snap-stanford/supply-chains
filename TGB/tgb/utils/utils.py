@@ -7,6 +7,8 @@ import sys
 import argparse
 import json
 import io
+import datetime
+import pytz
 
 WANDB_TEAM = "supply-chains-gnns"
 WANDB_PROJECT = "model-experiments"
@@ -87,3 +89,7 @@ def save_results(new_results: dict, filename: str):
         # dump the results
         with open(filename, 'w') as json_file:
             json.dump(new_results, json_file, indent=4)
+
+def current_pst_time():
+    return pytz.utc.localize(datetime.datetime.utcnow()).astimezone(pytz.timezone('US/Pacific'))
+

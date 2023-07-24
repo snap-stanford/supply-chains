@@ -1,5 +1,4 @@
 #!/bin/bash
-read -p "Enter your wandb username: " WANDB_USERNAME
 read -p "Enter your wandb sweep id: " WANDB_SWEEPID
 
 # Specify the number of GPUs and the desired GPU indices to run on.
@@ -19,6 +18,6 @@ do
   for ((j=0; j<NUM_AGENTS_PER_GPU; j++))
   do
     tmux new-session -d -s "gpu_${GPU_INDICES[i]}_${j}"
-    tmux send-keys -t "gpu_${GPU_INDICES[i]}_${j}" "${SCRIPT_DIR} ${WANDB_SWEEPID} ${GPU_INDICES[i]} ${WANDB_USERNAME} ${FILE_DIR}" Enter
+    tmux send-keys -t "gpu_${GPU_INDICES[i]}_${j}" "${SCRIPT_DIR} ${WANDB_SWEEPID} ${GPU_INDICES[i]} ${FILE_DIR}" Enter
   done
 done
