@@ -8,6 +8,8 @@ import argparse
 import json
 import io
 
+WANDB_TEAM = "supply-chains-gnns"
+WANDB_PROJECT = "model-experiments"
 
 # import torch
 def save_pkl(obj: Any, fname: str) -> None:
