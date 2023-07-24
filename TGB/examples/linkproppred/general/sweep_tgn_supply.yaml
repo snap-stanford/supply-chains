@@ -2,7 +2,7 @@ program: tgn.py
 method: grid
 metric:
   goal: maximize
-  name: perf_metric_test
+  name: perf_metric_val
 parameters:
   lr:
     values: [5e-3, 1e-4, 1e-5]
@@ -21,6 +21,6 @@ command:
   - "True"
   - "--data"
   - "tgbl-supplychains"
-project: curis-2023-tgb
-name: 20230720-tgn-supplychains-sweep
-entity: zhiyinl
+project: model-experiments
+name: 20230723-tgn-supply-sweep
+entity: supply-chains-gnns

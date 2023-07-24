@@ -2,7 +2,7 @@ program: tgn.py
 method: grid
 metric:
   goal: maximize
-  name: perf_metric_test
+  name: perf_metric_val
 parameters:
   lr:
     values: [5e-3, 1e-4, 1e-5]
@@ -19,6 +19,6 @@ command:
   - "100"
   - "--wandb"
   - "True"
-project: curis-2023-tgb
-name: 20230720-tgn-wiki-sweep
-entity: zhiyinl
+project: model-experiments
+name: 20230723-tgn-wiki-sweep
+entity: supply-chains-gnns

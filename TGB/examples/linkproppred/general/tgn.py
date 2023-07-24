@@ -25,7 +25,7 @@ from torch_geometric.loader import TemporalDataLoader
 from torch_geometric.nn import TransformerConv
 
 # internal imports
-from tgb.utils.utils import get_args, set_random_seed, save_results, current_pst_time
+from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
 from modules.decoder import LinkPredictor
 from modules.emb_module import GraphAttentionEmbedding
@@ -196,8 +196,8 @@ WANDB = args.wandb
 if WANDB:
     wandb.init(
         # set the wandb project where this run will be logged
-        project="curis-2023-tgb",
-        entity="zhiyinl",
+        project=WANDB_PROJECT,
+        entity=WANDB_TEAM,
         resume="allow",
 
         # track hyperparameters and run metadata
