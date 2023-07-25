@@ -8,9 +8,7 @@ NUM_GPUS=${#GPU_INDICES[@]}
 printf "You are using ${NUM_GPUS} GPU(s)\n"
 read -p "Enter your desired number of agents per GPU: " NUM_AGENTS_PER_GPU
 read -p "Enter your file's directory: " FILE_DIR # Directory to tgn.py, for example
-
-# Specify the path of script that tmux sessions run
-SCRIPT_DIR="/lfs/local/0/zhiyinl/supply-chains/TGB/scripts/sweep.sh"
+read -p "Enter the path of script that tmux sessions run: " SCRIPT_DIR # for example, "/lfs/local/0/zhiyinl/supply-chains/TGB/scripts/sweep.sh"
 
 # Loop through the GPU indices and launch the jobs in separate tmux sessions
 for ((i=0; i<NUM_GPUS; i++))
