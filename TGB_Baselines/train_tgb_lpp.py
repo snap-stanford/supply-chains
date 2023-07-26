@@ -323,16 +323,18 @@ def main():
             epoch_time = timeit.default_timer() - start_epoch
             logger.info(f'Epoch: {epoch + 1}, learning rate: {optimizer.param_groups[0]["lr"]}, train loss: {np.mean(train_losses):.4f}, elapsed time (s): {epoch_time:.4f}')
             if WANDB:
-                wandb.log({"loss": np.mean(train_losses),
-                           "elapsed_time_train_val": epoch_time
-                           })
+                WANDB_DICT = {}
+                WANDB_DICT.update({"loss": np.mean(train_losses),
+                                    "elapsed_time_train_val": epoch_time
+                                    })
             for metric_name in train_metrics[0].keys():
                 logger.info(f'train {metric_name}, {np.mean([train_metric[metric_name] for train_metric in train_metrics]):.4f}')
                 if WANDB:
-                    wandb.log({f"train {metric_name}": np.mean([train_metric[metric_name] for train_metric in train_metrics])})
+                    WANDB_DICT.update({f"train {metric_name}": np.mean([train_metric[metric_name] for train_metric in train_metrics])})
             logger.info(f'Validation: {metric}: {val_metric: .4f}')
             if WANDB:
-                wandb.log({"perf_metric_val": val_metric})
+                WANDB_DICT.update({"perf_metric_val": val_metric})
+                wandb.log(WANDB_DICT)
 
             # select the best model based on all the validate metrics
             val_metric_indicator = [(metric, val_metric, True)]
