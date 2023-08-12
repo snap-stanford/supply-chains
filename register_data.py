@@ -4,8 +4,7 @@ for the val & test splits, and supplementary metadata (e.g., mapping fom node ID
 
 SAMPLE USAGE:
 python register_data.py --csv_file ./data/daily_transactions_2019.csv --dataset_name 
-tgbl-supplychains-2021 --dir ./cache --logscale --workers 20 --bipartite
-(use the --bipartite flag to create a firm-product graph, and remove it to create a smaller firm-firm graph divested of products)
+tgbl-supplychains --dir ./cache --logscale --workers 20 --product_links both 
 """
 
 import pandas as pd
@@ -27,8 +26,10 @@ def get_args():
     parser.add_argument('--logscale', action='store_true', help = "if true, apply logarithm to edge weights")
     parser.add_argument('--workers', nargs='?', default = 10, type = int, help = "number of thread workers")
     parser.add_argument('--ns_samples', nargs='?', default = 20, type = int, help = "number of negative samples / pertubations per positive edge")
-    parser.add_argument('--bipartite', action='store_true', help = "whether to stratify nodes into firms & products")
+    parser.add_argument('--product_links', nargs='?', default = "none", help = "which product transactions to include, out of {'none', 'buy','supply','both'}")
+    #parser.add_argument('--bipartite', action='store_true', help = "whether to stratify nodes into firms & products")
     args = parser.parse_args()
+    assert args.product_links in {'none', 'buy','supply','both'}, "product edges must be in {'none', 'buy','supply','both'}"
     return args
 
 def process_csv_firm_firm(csv_file, metric, logscale):
@@ -49,13 +50,32 @@ def process_csv_firm_firm(csv_file, metric, logscale):
     df = df[["ts","source","target","weight"]]
     return df, id2company
 
-def process_csv_firm_product(csv_file, metric, logscale):
+def update_graph(graph, df_transactions, company2id, product2id, metric, firm_to_product = False): 
+    #graph is dictionary with keys {'ts','source','target', 'weight'}, while df_transactions 
+    #is Pandas dataframe with column names {'time_stamp','hs6','firm_t'}
+    if graph == {}:
+        graph = {"ts": [], "source": [], "target": [], "weight": []}
+    df_rows = [list(df_transactions[r]) for r in ["time_stamp","hs6","firm_t",metric]]
+    for ts, hs6, firm_t, weight in zip(*df_rows): 
+        graph["ts"].append(ts)
+        if (firm_to_product == True):
+            graph["source"].append(company2id[firm_t])
+            graph["target"].append(product2id[hs6])
+        else:
+            graph["source"].append(product2id[hs6])
+            graph["target"].append(company2id[firm_t])
+        graph["weight"].append(weight)
+    return graph 
+    
+def process_csv_firm_product(csv_file, metric, logscale = False, product_edges_state = "both"):
     df = pd.read_csv(csv_file)
     df = df.groupby(by = ["time_stamp","supplier_t","buyer_t","hs6"]).sum(numeric_only = True).reset_index()
     df = df[(df["supplier_t"] != "") & (df["buyer_t"] != "") & (~df[metric].isna()) & (~df["supplier_t"].isna()) & (~df["buyer_t"].isna())]
     all_companies = set(df["supplier_t"]).union(set(df["buyer_t"]))
     all_products = set(df["hs6"])
-
+    if (logscale == True): 
+        df[metric] = df[metric].apply(lambda weight: np.log10(weight + 1))
+        
     #create map from node IDs to firm / product names, and inverse
     company2id = {value: key for key,value in enumerate(all_companies)}
     product2id = {value: key + len(all_companies) for key,value in enumerate(all_products)}
@@ -65,20 +85,45 @@ def process_csv_firm_product(csv_file, metric, logscale):
     #minimum ID for a product (to distinguish between firm & product nodes)
     product_threshold = min(list(id2product.keys()))
 
-    #create new dataframe for firm-product links (selling is firm -> product and purchase is product -> firm)
+    #create new dataframe for firm-product links. when both buy and supply links are included,
+    #supplying is firm -> product and buying is product -> firm)
+    bipartite_graph = {"ts": [], "source": [], "target": [], "weight": []}
+    df_supplier = df.groupby(by = ["time_stamp","hs6","supplier_t"]).sum(numeric_only = True).reset_index().rename(
+        columns = {"supplier_t":"firm_t"})
+    df_buyer = df.groupby(by = ["time_stamp","hs6","buyer_t"]).sum(numeric_only = True).reset_index().rename(
+        columns = {"buyer_t":"firm_t"})
+    
+    if (product_edges_state == "both"): 
+        bipartite_graph = update_graph(bipartite_graph, df_supplier, company2id, product2id, metric, 
+                                      firm_to_product = True)
+        bipartite_graph = update_graph(bipartite_graph, df_buyer, company2id, product2id, metric, 
+                                      firm_to_product = False)
+    elif (product_edges_state == "buy"):
+        bipartite_graph = update_graph(bipartite_graph, df_buyer, company2id, product2id, metric,
+                                       firm_to_product = True)
+    else: #exclusively supplier edges
+        bipartite_graph = update_graph(bipartite_graph, df_supplier, company2id, product2id, metric,
+                                       firm_to_product = True)
+    
+    """
     rows = [list(df[row_t]) for row_t in ["time_stamp","hs6","supplier_t","buyer_t",metric]]
-    df_bipartite = {"ts": [], "source": [], "target": [], "weight": []}
     for ts, product, supplier, buyer, edge_weight in zip(*rows):
         supplier_id, buyer_id = company2id[supplier], company2id[buyer]
         product_id = product2id[product]
         weight = np.log10(edge_weight + 1) if logscale == True else edge_weight
         
-        df_bipartite["ts"].extend([ts,ts])
-        df_bipartite["source"].extend([supplier_id, product_id])
-        df_bipartite["target"].extend([product_id, buyer_id])
-        df_bipartite["weight"].extend([weight, weight])
-
-    df_bipartite = pd.DataFrame.from_dict(df_bipartite)
+        if product_edges_state == "buy" or product_edges_state == "supply":
+            df_bipartite["ts"].append(ts)
+            df_bipartite["source"].append(buyer_id if product_edges_state == "buy" else supplier_id)
+            df_bipartite["target"].append(product_id)
+            df_bipartite["weight"].append(weight)
+        else:
+            df_bipartite["ts"].extend([ts,ts])
+            df_bipartite["source"].extend([supplier_id, product_id])
+            df_bipartite["target"].extend([product_id, buyer_id])
+            df_bipartite["weight"].extend([weight, weight])
+    """
+    df_bipartite = pd.DataFrame.from_dict(bipartite_graph)
     return df_bipartite, id2entity, product_threshold
 
 def partition_edges(df, train_max_ts, val_max_ts, test_max_ts):
@@ -165,14 +210,18 @@ def harness_negative_sampler(eval_ns_keys, split = "val", num_workers = 20):
 if __name__ == "__main__":
     args = get_args()
     #extract temporal edges from the CSV file of supply-chain transactions
-    if (args.bipartite == True):
-        df, id2entity, product_min_id = process_csv_firm_product(args.csv_file, args.metric, args.logscale)
+    global bipartite
+    bipartite = args.product_links != "none"
+    if (bipartite == True):
+        df, id2entity, product_min_id = process_csv_firm_product(args.csv_file, args.metric, args.logscale, args.product_links)
     else:
         df, id2entity = process_csv_firm_firm(args.csv_file, args.metric, args.logscale)
         product_min_id = len(id2entity)
     
     num_nodes = len(id2entity) #number of nodes
     df.to_csv(os.path.join(args.dir, f"{args.dataset_name}_edgelist.csv"), index = False) #save out edgelist
+    print(f"Total Number of Nodes: {num_nodes}")
+    print(f"Total Number of Edges: {len(df)}")
 
     #stratify the data into train, val, test split based on 70%-15%-15% of edges
     timestamps = sorted(list(df["ts"]))
@@ -182,8 +231,8 @@ if __name__ == "__main__":
     E_train, E_val, E_test = partition_edges(df, train_max_ts, val_max_ts, test_max_ts)
 
     #create pool of node targets (firm & products) to be randomly selected during training 
-    global num_samples; global bipartite; global L_firm; global L_products
-    num_samples, bipartite = args.ns_samples, args.bipartite
+    global num_samples; global L_firm; global L_products
+    num_samples = args.ns_samples
     L_firm = list(range(0, product_min_id))
     L_products = list(range(product_min_id, len(id2entity)))
 

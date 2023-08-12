@@ -24,6 +24,7 @@ from tgb.utils.pre_process import (
     load_edgelist_trade,
 )
 
+import json
 
 class NodePropPredDataset(object):
     def __init__(
@@ -79,13 +80,22 @@ class NodePropPredDataset(object):
                 self.root + "/" + self.name + "_node_labels.csv"
             )
 
-        self._num_classes = DATA_NUM_CLASSES[self.name]
+        if (self.name in DATA_NUM_CLASSES):
+            self._num_classes = DATA_NUM_CLASSES[self.name]
+        else:
+            ancillary_filepath = self.root + "/" + self.name + "_meta.json"
+            with open(ancillary_filepath, "r") as file: 
+                ancillary_data = json.load(file)
+            self._num_classes = ancillary_data["num_classes"]
+            #load it via metadata 
 
         # initialize
         self._node_feat = None
         self._edge_feat = None
         self._full_data = None
-        self.download()
+
+        if ("supplychains" not in self.name):
+            self.download()
         # check if the root directory exists, if not create it
         if osp.isdir(self.root):
             print("Dataset directory is ", self.root)
@@ -197,12 +207,20 @@ class NodePropPredDataset(object):
                 df, edge_feat, node_ids = load_edgelist_trade(
                     self.meta_dict["fname"], label_size=self._num_classes
                 )
+            elif self.name == "tgbn-supplychains":
+                df, edge_feat, node_ids, labels_dict = load_edgelist_datetime(
+                    self.meta_dict["fname"], label_size=self._num_classes
+                )
 
             df.to_pickle(OUT_DF)
 
             if self.name == "tgbn-trade":
                 node_label_dict = load_trade_label_dict(
                     self.meta_dict["nodefile"], node_ids
+                )
+            elif self.name == "tgbn-supplychains":
+                node_label_dict = load_label_dict(
+                    self.meta_dict["nodefile"], node_ids, labels_dict
                 )
             else:
                 node_label_dict = load_label_dict(
@@ -428,21 +446,21 @@ class NodePropPredDataset(object):
 
 def main():
     # download files
-    name = "tgbn-trade" 
+    name = "tgbn-supplychains" 
     dataset = NodePropPredDataset(name=name, root="datasets", preprocess=True)
 
-    dataset.node_feat
+    print(dataset.full_data)
     dataset.edge_feat  # not the edge weights
     dataset.full_data
     dataset.full_data["edge_idxs"]
     dataset.full_data["sources"]
     dataset.full_data["destinations"]
     dataset.full_data["timestamps"]
-    dataset.full_data["y"]
+    #dataset.full_data["y"]
 
-    train_data = dataset.full_data[dataset.train_mask]
-    val_data = dataset.full_data[dataset.val_mask]
-    test_data = dataset.full_data[dataset.test_mask]
+    #train_data = dataset.full_data[dataset.train_mask]
+    #val_data = dataset.full_data[dataset.val_mask]
+    #test_data = dataset.full_data[dataset.test_mask]
 
 
 if __name__ == "__main__":

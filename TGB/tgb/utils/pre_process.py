@@ -141,6 +141,19 @@ def load_trade_label_dict(
                 idx += 1
         return node_label_dict
 
+"""
+for supply chains (TODO: edit here, plus chnage metadata to easily store number of products)
+"""
+
+def load_edgelist_supplychains(fname: str, label_size=255):
+    pass 
+
+def load_supplychains_label_dict(
+    fname: str,
+    node_ids: dict
+) -> dict:
+    pass 
+
 
 """
 functions for subreddits dataset

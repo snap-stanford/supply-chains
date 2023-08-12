@@ -48,6 +48,8 @@ class LinkPropPredDataset(object):
         # check if the evaluatioin metric are specified
         if self.name in DATA_EVAL_METRIC_DICT:
             self.metric = DATA_EVAL_METRIC_DICT[self.name]
+        elif "tgbl-supplychains" in self.name:
+            self.metric = "mrr"
         else:
             self.metric = None
             print(
@@ -80,7 +82,7 @@ class LinkPropPredDataset(object):
         self._val_data = None
         self._test_data = None
 
-        if (self.name != "tgbl-supplychains"):
+        if ("tgbl-supplychains" not in self.name):
             self.download()
         
         # check if the root directory exists, if not create it
@@ -185,7 +187,7 @@ class LinkPropPredDataset(object):
                 df, edge_feat, node_ids = csv_to_pd_data_sc(self.meta_dict["fname"])
             elif self.name == "tgbl-wiki":
                 df, edge_feat, node_ids = load_edgelist_wiki(self.meta_dict["fname"])
-            elif self.name == "tgbl-supplychains":
+            elif "tgbl-supplychains" in self.name:
                 #TODO: change this 
                 print(self.meta_dict["fname"])
                 df, edge_feat, node_ids = csv_to_pd_data_hitachi(self.meta_dict["fname"])
