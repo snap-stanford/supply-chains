@@ -57,7 +57,7 @@ of textile materials (other than wool or fine animal hair, cotton
 or man-made fibres), knitted or crocheted"""
 ```
 
-### Hitachi Dataset
+### Hitachi Dataset (index_hs6)
 For Hitachi, one would run an analagous script, although the `year` is provided differently (since the loader gives data from all years simultaneously). Note that both datasets may have certain products or entities missing.
 
 ```python
@@ -77,3 +77,22 @@ print(trade_flows_2020[(exporter_country,product_code)])
 ```
 
 The above retrieves the values for flexible iron or steel tubing (hs6 code = `830710`) exported by the United States in `2020`. 
+
+# Hitachi Dataset (logistic_data)
+This gathers data from transactions in `logistic_data` rather than `index_hs6`, as conducted in the previous section. First, run the following preprocessing script to extract relevant mapping tables. 
+```zsh
+python  ../temporal_graph/extract_tables.py --dir ./ --rs_login <Redshift username> <Redshift password>
+```
+This will save out three dictionaries (`./hitachi_{company, country, product}_mappers.json`). Below is a sample script for obtaining aggregated values.
+```python
+import read_logistic
+
+rs = RedshiftClass(args.rs_login[0], args.rs_login[1])
+product_map, trade_flow_map = get_Hitachi_data(rs, "exporter_product", hs_digits = 6, year = 2021, maps_dir = "./")
+
+#exports of refined lead products from the United States 
+print(trade_flow_map[('USA', '780110')])
+
+"""output: {'bill_count': 2, 'currency': 90210.9296875, 'quantity': 40742.0, 'weight': 40749.0} """
+```
+Note this may take slightly longer than the above acquisitions (i.e. with BACI and `index_hs6`).
