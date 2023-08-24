@@ -237,3 +237,85 @@ class PyGLinkPropPredDataset(Dataset):
 
     def __repr__(self) -> str:
         return f"{self.name.capitalize()}()"
+
+class PyGLinkPropPredDatasetHyper(PyGLinkPropPredDataset):
+    def process_data(self) -> None:
+        r"""
+        convert the numpy arrays from dataset to pytorch tensors
+        """
+        src = torch.from_numpy(self.dataset.full_data["sources"])
+        prod = torch.from_numpy(self.dataset.full_data["products"])
+        dst = torch.from_numpy(self.dataset.full_data["destinations"])
+        ts = torch.from_numpy(self.dataset.full_data["timestamps"])
+        msg = torch.from_numpy(
+            self.dataset.full_data["edge_feat"]
+        )  # use edge features here if available
+        edge_label = torch.from_numpy(
+            self.dataset.full_data["edge_label"]
+        )  # this is the label indicating if an edge is a true edge, always 1 for true edges
+
+        # * first check typing for all tensors
+        # source tensor must be of type int64
+        # warnings.warn("sources tensor is not of type int64 or int32, forcing conversion")
+        if src.dtype != torch.int64:
+            src = src.long()
+
+        if prod.dtype != torch.int64:
+            prod = prod.long()
+        
+        # destination tensor must be of type int64
+        if dst.dtype != torch.int64:
+            dst = dst.long()
+
+        # timestamp tensor must be of type int64
+        if ts.dtype != torch.int64:
+            ts = ts.long()
+
+        # message tensor must be of type float32
+        if msg.dtype != torch.float32:
+            msg = msg.float()
+
+        self._src = src
+        self._prod = prod
+        self._dst = dst
+        self._ts = ts
+        self._edge_label = edge_label
+        self._edge_feat = msg
+        
+    @property
+    def prod(self) -> torch.Tensor:
+        return self._prod
+
+    def get_TemporalData(self) -> TemporalData:
+        """
+        return the TemporalData object for the entire dataset
+        """
+        data = TemporalData(
+            src=self._src,
+            prod=self._prod,
+            dst=self._dst,
+            t=self._ts,
+            msg=self._edge_feat,
+            y=self._edge_label,
+        )
+        return data
+
+    def get(self, idx: int) -> TemporalData:
+        """
+        construct temporal data object for a single edge
+        Parameters:
+            idx: index of the edge
+        Returns:
+            data: TemporalData object
+        """
+        data = TemporalData(
+            src=self._src[idx],
+            prod = self._prod[idx],
+            dst=self._dst[idx],
+            t=self._ts[idx],
+            msg=self._edge_feat[idx],
+            y=self._edge_label[idx],
+        )
+        return data
+
+    

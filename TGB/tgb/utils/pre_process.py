@@ -586,7 +586,32 @@ def csv_to_pd_data_hitachi(
         node_ids,
     )
 
+def convert_hypergraph(fname: str) -> pd.DataFrame:
+    df = pd.read_csv(fname)
+    feat_size = 1
+    num_lines = len(df)
 
+    idx_list = np.array(range(1, num_lines + 1))
+    label_list = np.zeros(num_lines)
+    #feat_l = np.zeros((num_lines, feat_size))
+    feat_l = np.expand_dims(np.array(df["weight"]), axis = -1)
+    node_ids = {i:i for i in range(max(set(df["product"])))} #identity maping
+
+    return (
+        pd.DataFrame(
+            {
+                "u": list(df["source"]),
+                "p": list(df["product"]),
+                "i": list(df["target"]),
+                "ts": list(df["ts"]),
+                "label": label_list,
+                "idx": idx_list,
+                "w": [float(w) for w in list(df["weight"])],
+            }
+        ),
+        feat_l,
+        node_ids,
+    )
 
 
 """

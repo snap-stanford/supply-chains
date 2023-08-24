@@ -166,7 +166,7 @@ def edge_sampler_wrapper(split): #returns a edge sampler function for either the
                                         size = num_samples - len(hist_nodes) - len(second_nodes), replace = False)
             sampled_nodes = list(hist_nodes) + list(second_nodes) + list(neg_nodes)
             
-            all_samples.append(sampled_nodes)
+            all_samples.extend(sampled_nodes)
 
         return np.array(all_samples).astype(np.float64)
 
