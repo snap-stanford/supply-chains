@@ -49,8 +49,8 @@ def process_csv(csv_file, metric, logscale):
         df[metric] = df[metric].apply(lambda value: np.log10(value + 1))
     graph = {"ts": list(df["time_stamp"]),
              "source": [company2id[firm] for firm in df["supplier_t"]],
-             "product": [company2id[firm] for firm in df["buyer_t"]],
-            "target": [product2id[firm] for firm in df["hs6"]],
+              "product": [product2id[product] for product in df["hs6"]],
+             "target": [company2id[firm] for firm in df["buyer_t"]],
              "weight": list(df[metric])}
     return pd.DataFrame.from_dict(graph), id2entity, product_threshold
 
@@ -59,9 +59,9 @@ def partition_edges(df, train_max_ts, val_max_ts, test_max_ts):
     E_val = {ts: [] for ts in range(train_max_ts + 1, val_max_ts + 1)}
     E_test = {ts: [] for ts in range(val_max_ts + 1, test_max_ts + 1)}
     
-    df_rows = [df[row_name] for row_name in ["source","target","product","ts"]]
-    for source, target, product, ts in zip(*df_rows):
-        ts, edge = int(ts), [int(source), int(target), int(product)]
+    df_rows = [df[row_name] for row_name in ["source","product","target","ts"]]
+    for source, product, target, ts in zip(*df_rows):
+        ts, edge = int(ts), [int(source), int(product), int(target)]
         if (ts <= train_max_ts): 
             E_train[ts].append(edge)
         elif (ts <= val_max_ts): 
@@ -111,10 +111,10 @@ def search_map(map, key):
         return map[key]
     return set()
 
-def get_eval_negative_links(E_train, E_eval): #E_eval among {E_val, E_test}
+def get_eval_negative_links(E_train, E_eval, split = "val"): #E_eval among {E_val, E_test}
     train_links, second_links, _ = get_links_dict(E_train, True)
     eval_ns_links, eval_ns_keys = {}, []
-    print("Processing Through Evaluation Links ...")
+    print("Processing Through {} Links ...".format(split.capitalize()))
     for ts in tqdm(E_eval):
         eval_ns_links[ts] = {}
         eval_links_map, _, eval_edges = get_links_dict({ts: E_eval[ts]}, False)
@@ -164,8 +164,8 @@ def edge_sampler_wrapper(split): #returns a edge sampler function for either the
             else:
                 neg_nodes = np.random.choice([l for l in L_firm if l not in negative_inv],
                                         size = num_samples - len(hist_nodes) - len(second_nodes), replace = False)
-
             sampled_nodes = list(hist_nodes) + list(second_nodes) + list(neg_nodes)
+            
             all_samples.append(sampled_nodes)
 
         return np.array(all_samples).astype(np.float64)
@@ -183,7 +183,7 @@ def harness_negative_sampler(eval_ns_keys, split = "val", num_workers = 20):
 
 if __name__ == "__main__":
     args = get_args()
-
+    global product_min_id
     df, id2entity, product_min_id = process_csv(args.csv_file, args.metric, args.logscale)
     df.to_csv(os.path.join(args.dir, f"{args.dataset_name}_edgelist.csv"), index = False) #save out edgelist
     num_nodes, num_firms, num_products = len(id2entity), product_min_id, len(id2entity) - product_min_id
@@ -206,8 +206,8 @@ if __name__ == "__main__":
 
     #retrieve positive edges and sample negative ones in the val & test splits 
     global val_ns_links; global test_ns_links
-    val_ns_links, val_ns_keys = get_eval_negative_links(E_train, E_val)
-    test_ns_links, test_ns_keys = get_eval_negative_links(E_train, E_test)
+    val_ns_links, val_ns_keys = get_eval_negative_links(E_train, E_val, split = "val")
+    test_ns_links, test_ns_keys = get_eval_negative_links(E_train, E_test, split = "test")
     val_ns = harness_negative_sampler(val_ns_keys, split = "val", num_workers = args.workers)
     test_ns = harness_negative_sampler(test_ns_keys, split = "test", num_workers = args.workers)
 
@@ -219,5 +219,6 @@ if __name__ == "__main__":
         pickle.dump(test_ns, handle, protocol=pickle.HIGHEST_PROTOCOL)
     
     with open(os.path.join(args.dir, f'{args.dataset_name}_meta.json'),"w") as file:
-        meta = {"product_threshold": product_min_id, "id2entity": id2entity}
+        meta = {"product_threshold": product_min_id, "id2entity": id2entity,
+               "train_max_ts": int(train_max_ts), "val_max_ts": int(val_max_ts), "test_max_ts": int(test_max_ts)}
         json.dump(meta, file, indent = 4)
