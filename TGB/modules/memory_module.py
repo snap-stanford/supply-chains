@@ -40,38 +40,51 @@ class TGNPLMemory(torch.nn.Module):
     def __init__(
         self,
         num_nodes: int,
+        num_prods: int,
         raw_msg_dim: int,
-        memory_dim: int,
+        state_dim: int,
         time_dim: int,
         message_module: Callable,
         aggregator_module: Callable,
-        memory_updater_cell: str = "gru",
+        state_updater_cell: str = "gru",
+        use_inventory: bool = True,
     ):
         super().__init__()
         self.num_nodes = num_nodes
+        self.num_prods = num_prods
         self.raw_msg_dim = raw_msg_dim
-        self.memory_dim = memory_dim
+        self.state_dim = state_dim
         self.time_dim = time_dim
-
-        self.msg_module = message_module
+        
+        self.msg_s_module = message_module  # msg module for supplier (src)
+        self.msg_d_module = message_module  # msg module for buyer (dst)
+        self.msg_p_module = message_module  # msg module for product (prod)
         self.aggr_module = aggregator_module
         self.time_enc = TimeEncoder(time_dim)
-        # self.gru = GRUCell(message_module.out_channels, memory_dim)
-        if memory_updater_cell == "gru":  # for TGN
-            self.memory_updater = GRUCell(message_module.out_channels, memory_dim)
-        elif memory_updater_cell == "rnn":  # for JODIE & DyRep
-            self.memory_updater = RNNCell(message_module.out_channels, memory_dim)
+        self.use_inventory = use_inventory
+        
+        if state_updater_cell == "gru":  # for TGN
+            self.state_updater = GRUCell(message_module.out_channels, state_dim)
+        elif state_updater_cell == "rnn":  # for JODIE & DyRep
+            self.state_updater = RNNCell(message_module.out_channels, state_dim)
         else:
             raise ValueError(
-                "Undefined memory updater!!! Memory updater can be either 'gru' or 'rnn'."
+                "Undefined state updater!!! State updater can be either 'gru' or 'rnn'."
             )
-        self.register_buffer("memory", torch.empty(num_nodes, memory_dim))
-        last_update = torch.empty(self.num_nodes, dtype=torch.long)
-        self.register_buffer("last_update", last_update)
-        self.register_buffer("_assoc", torch.empty(num_nodes, dtype=torch.long))
+            
+        if self.use_inventory:
+            self.memory_dim = self.state_dim + self.num_prods
+        else:
+            self.memory_dim = self.state_dim
+        self.register_buffer("memory", torch.empty(self.num_nodes, self.memory_dim))
+        self.register_buffer("last_update", torch.empty(self.num_nodes, dtype=torch.long))
+        self.register_buffer("_assoc", torch.empty(self.num_nodes, dtype=torch.long))
+        if self.use_inventory:
+            self.prod_linear = Linear(self.state_dim * 2, 1)  # for pairwise attention
 
-        self.msg_store = {}
-
+        self.msg_s_store = {}
+        self.msg_d_store = {}
+        self.msg_p_store = {}
         self.reset_parameters()
 
     @property
@@ -80,12 +93,18 @@ class TGNPLMemory(torch.nn.Module):
 
     def reset_parameters(self):
         r"""Resets all learnable parameters of the module."""
-        if hasattr(self.msg_module, "reset_parameters"):
-            self.msg_module.reset_parameters()
+        if hasattr(self.msg_s_module, "reset_parameters"):
+            self.msg_s_module.reset_parameters()
+        if hasattr(self.msg_d_module, "reset_parameters"):
+            self.msg_d_module.reset_parameters()
+        if hasattr(self.msg_p_module, "reset_parameters"):
+            self.msg_p_module.reset_parameters()
         if hasattr(self.aggr_module, "reset_parameters"):
             self.aggr_module.reset_parameters()
         self.time_enc.reset_parameters()
-        self.memory_updater.reset_parameters()
+        self.state_updater.reset_parameters()
+        if self.use_inventory:
+            self.prod_linear.reset_parameters()
         self.reset_state()
 
     def reset_state(self):
@@ -94,106 +113,143 @@ class TGNPLMemory(torch.nn.Module):
         zeros(self.last_update)
         self._reset_message_store()
 
+    def _reset_message_store(self):
+        i = self.memory.new_empty((0,), device=self.device, dtype=torch.long)
+        msg = self.memory.new_empty((0, self.raw_msg_dim), device=self.device)
+        # Message store format: (src, dst, prod, t, msg)
+        self.msg_s_store = {j: (i, i, i, i, msg) for j in range(self.num_nodes)}
+        self.msg_d_store = {j: (i, i, i, i, msg) for j in range(self.num_nodes)}
+        self.msg_p_store = {j: (i, i, i, i, msg) for j in range(self.num_nodes)}
+
     def detach(self):
         """Detaches the memory from gradient computation."""
         self.memory.detach_()
 
     def forward(self, n_id: Tensor) -> Tuple[Tensor, Tensor]:
-        """Returns, for all nodes :obj:`n_id`, their current memory, inventory, and their
+        """Returns, for all nodes :obj:`n_id`, their current memory and their
         last updated timestamp."""
         if self.training:
-            memory, inventory, last_update = self._get_updated_memory(n_id)
+            memory, last_update = self._get_updated_memory(n_id)
         else:
-            memory, inventory, last_update = self.memory[n_id], self.inventory[n_id], self.last_update[n_id]
-        return torch.cat([memory, inventory], dim=1), last_update
+            memory, last_update = self.memory[n_id], self.last_update[n_id]
 
-    def update_state(self, src: Tensor, prod: Tensor, dst: Tensor, t: Tensor, raw_msg: Tensor):
+        return memory, last_update
+
+    def update_state(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, raw_msg: Tensor):
         """Updates the memory with newly encountered interactions
-        :obj:`(src, prod, dst, t, raw_msg)`."""
-        n_id = torch.cat([src, prod, dst]).unique()
+        :obj:`(src, dst, prod, t, raw_msg)`."""
+        # update state for all nodes that appeared in this batch
+        n_id = torch.cat([src, dst, prod]).unique()  
 
         if self.training:
             self._update_memory(n_id)
-            self._update_msg_store(src, prod, dst, t, raw_msg, self.msg_module)
+            self._update_msg_store(src, dst, prod, t, raw_msg, self.msg_s_store, key="src")
+            self._update_msg_store(src, dst, prod, t, raw_msg, self.msg_d_store, key="dst")
+            self._update_msg_store(src, dst, prod, t, raw_msg, self.msg_p_store, key="prod")
         else:
-            self._update_msg_store(src, prod, dst, t, raw_msg, self.msg_module)
+            self._update_msg_store(src, dst, prod, t, raw_msg, self.msg_s_store, key="src")
+            self._update_msg_store(src, dst, prod, t, raw_msg, self.msg_d_store, key="dst")
+            self._update_msg_store(src, dst, prod, t, raw_msg, self.msg_p_store, key="prod")
             self._update_memory(n_id)
     
-    def inventory_updater(self, aggr: Tensor, inventory: Tensor) -> Tensor:
-        pass
-        # compute attention weights between products (14, 15)
-        # return delta_inventory, same shape as original inventory
-        # inventory = inventory + delta_inventory
-        # compute attention weights outside and pass it in, currently embedding
-
-
-    def _reset_message_store(self):
-        i = self.memory.new_empty((0,), device=self.device, dtype=torch.long)
-        msg = self.memory.new_empty((0, self.raw_msg_dim), device=self.device)
-        self.msg_store = {j: (i, i, i, msg) for j in range(self.num_nodes)}
-
     def _update_memory(self, n_id: Tensor):
-        memory, inventory, last_update = self._get_updated_memory(n_id)
+        """
+        Update the stored memory and last update for nodes in n_id.
+        """
+        memory, last_update = self._get_updated_memory(n_id)
         self.memory[n_id] = memory
         self.last_update[n_id] = last_update
 
     def _get_updated_memory(self, n_id: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Get current memory and last update for nodes in n_id, using their 
+        current stored interactions.
+        """
         self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
-
-        # Compute messages
-        msg, t, src, prod, dst = self._compute_msg(
-            n_id, self.msg_store, self.msg_module
+        state, inventory = self.memory[n_id, :self.state_dim], self.memory[n_id, self.state_dim:]
+        
+        # Update inventory
+        if self.use_inventory:
+            pass
+        
+        # Update states
+        # Compute messages to suppliers in interactions where n_id is supplier
+        msg_s, t_s, idx_s, _, _ = self._compute_msg(
+            n_id, self.msg_s_store, self.msg_s_module
+        )  
+        
+        # Compute messages to buyers in interactions where n_id is buyer
+        msg_d, t_d, _, idx_d, _ = self._compute_msg(
+            n_id, self.msg_d_store, self.msg_d_module
+        ) 
+        
+        # Compute messages to products in interactions where n_id is product
+        msg_p, t_p, _, _, idx_p = self._compute_msg(
+            n_id, self.msg_p_store, self.msg_p_module
         )
-
-        # TODO: change way of aggregation: from transaction level msg -> node level msg, depending on the batch implementation
-        # Aggregate messages.
-        idx = torch.cat([src, prod, dst], dim=0)
-        aggr = self.aggr_module(msg, self._assoc[idx], t, n_id.size(0))
-
-        # Get local copy of inventory
-        inventory = self.inventory_updater(aggr, self.inventory[n_id]) # TODO
-
-        # Get local copy of updated memory. (per node)
-        memory = self.memory_updater(aggr, self.memory[n_id])
-        # TODO: different GRU for three types
-
+        
+        # Aggregate messages
+        idx = torch.cat([idx_s, idx_d, idx_p], dim=0)
+        msg = torch.cat([msg_s, msg_d, msg_p], dim=0)
+        t = torch.cat([t_s, t_d, t_p], dim=0)
+        aggr = self.aggr_module(msg, self._assoc[idx], t, n_id.size(0))  # one aggregated msg per node
+        
+        # Get local copy of updated memory
+        state = self.state_updater(aggr, state)
+        memory = torch.cat([state, inventory], dim=1)
+        
         # Get local copy of updated `last_update`.
         dim_size = self.last_update.size(0)
         last_update = scatter(t, idx, 0, dim_size, reduce="max")[n_id]
-
-        return memory, inventory, last_update
-
-    def _update_msg_store(
-        self,
-        src: Tensor,
-        prod: Tensor,
-        dst: Tensor,
-        t: Tensor,
-        raw_msg: Tensor,
-        msg_store: TGNMessageStoreType,
-    ):
-        n_id, perm = src.sort()
-        n_id, count = n_id.unique_consecutive(return_counts=True)
-        for i, idx in zip(n_id.tolist(), perm.split(count.tolist())):
-            msg_store[i] = (src[idx], prod[idx], dst[idx], t[idx], raw_msg[idx])
-
+        
+        return memory, last_update
+    
     def _compute_msg(
         self, n_id: Tensor, msg_store: TGNMessageStoreType, msg_module: Callable
     ):
+        """
+        Compute messages for nodes in n_id based on the interactions stored in msg_store.
+        The length of the returned msg is the total number of interactions keyed by n_id
+        in msg_store.
+        """
         data = [msg_store[i] for i in n_id.tolist()]
-        src, prod, dst, t, raw_msg = list(zip(*data))
+        src, dst, prod, t, raw_msg = list(zip(*data))  # unzip
         src = torch.cat(src, dim=0)
-        prod = torch.cat(prod, dim=0)
         dst = torch.cat(dst, dim=0)
+        prod = torch.cat(prod, dim=0)
         t = torch.cat(t, dim=0)
         raw_msg = torch.cat(raw_msg, dim=0)
         t_rel = t - self.last_update[src]
         t_enc = self.time_enc(t_rel.to(raw_msg.dtype))
 
-        msg = msg_module(self.memory[src], self.memory[prod], self.memory[dst], raw_msg, t_enc)
+        msg = msg_module(self.memory[src], self.memory[dst], self.memory[prod], raw_msg, t_enc)
 
         return msg, t, src, prod, dst
-
+    
+    def _update_msg_store(
+        self,
+        src: Tensor,
+        dst: Tensor,
+        prod: Tensor,
+        t: Tensor,
+        raw_msg: Tensor,
+        msg_store: TGNMessageStoreType,
+        key: str = "src",
+    ):
+        if key == "src":
+            key = src
+        elif key == "dst":
+            key = dst
+        elif key == "prod":
+            key = prod
+        else:
+            raise Exception(f"Invalid key in _update_msg_store: {key}"
+        n_id, perm = key.sort()
+        n_id, count = n_id.unique_consecutive(return_counts=True)
+        # map each node to its interactions where it is in the key role (src, dst, or prod)
+        for i, idx in zip(n_id.tolist(), perm.split(count.tolist())):
+            msg_store[i] = (src[idx], dst[idx], prod[idx], t[idx], raw_msg[idx])
+    
     def train(self, mode: bool = True):
         """Sets the module in training mode."""
         if self.training and not mode:
@@ -202,6 +258,7 @@ class TGNPLMemory(torch.nn.Module):
             self._reset_message_store()
         super().train(mode)
 
+        
 class TGNMemory(torch.nn.Module):
     r"""The Temporal Graph Network (TGN) memory model from the
     `"Temporal Graph Networks for Deep Learning on Dynamic Graphs"
