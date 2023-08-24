@@ -19,7 +19,7 @@ from torch_geometric.utils import scatter
 from modules.time_enc import TimeEncoder
 
 
-TGNMessageStoreType = Dict[int, Tuple[Tensor, Tensor, Tensor, Tensor]]
+TGNMessageStoreType = Dict[int, Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]
 
 class TGNPLMemory(torch.nn.Module):
     r"""Our memory model
@@ -48,6 +48,7 @@ class TGNPLMemory(torch.nn.Module):
         aggregator_module: Callable,
         state_updater_cell: str = "gru",
         use_inventory: bool = True,
+        debug: bool = False,
     ):
         super().__init__()
         self.num_nodes = num_nodes
@@ -62,6 +63,7 @@ class TGNPLMemory(torch.nn.Module):
         self.aggr_module = aggregator_module
         self.time_enc = TimeEncoder(time_dim)
         self.use_inventory = use_inventory
+        self.debug = debug
         
         if state_updater_cell == "gru":  # for TGN
             self.state_updater = GRUCell(message_module.out_channels, state_dim)
@@ -176,28 +178,38 @@ class TGNPLMemory(torch.nn.Module):
         # Compute messages to suppliers in interactions where n_id is supplier
         msg_s, t_s, idx_s, _, _ = self._compute_msg(
             n_id, self.msg_s_store, self.msg_s_module
-        )  
+        ) 
+        if self.debug:
+            print('msg_s', msg_s)
         
         # Compute messages to buyers in interactions where n_id is buyer
         msg_d, t_d, _, idx_d, _ = self._compute_msg(
             n_id, self.msg_d_store, self.msg_d_module
         ) 
+        if self.debug:
+            print('msg_d', msg_d)
         
         # Compute messages to products in interactions where n_id is product
         msg_p, t_p, _, _, idx_p = self._compute_msg(
             n_id, self.msg_p_store, self.msg_p_module
         )
+        if self.debug:
+            print('msg_p', msg_d)
         
         # Aggregate messages
         idx = torch.cat([idx_s, idx_d, idx_p], dim=0)
         msg = torch.cat([msg_s, msg_d, msg_p], dim=0)
         t = torch.cat([t_s, t_d, t_p], dim=0)
         aggr = self.aggr_module(msg, self._assoc[idx], t, n_id.size(0))  # one aggregated msg per node
+        if self.debug:
+            print('aggr', aggr)
         
         # Get local copy of updated memory
         state = self.state_updater(aggr, state)
         memory = torch.cat([state, inventory], dim=1)
-        
+        if self.debug:
+            print('memory', memory)
+            
         # Get local copy of updated `last_update`.
         dim_size = self.last_update.size(0)
         last_update = scatter(t, idx, 0, dim_size, reduce="max")[n_id]
@@ -243,7 +255,7 @@ class TGNPLMemory(torch.nn.Module):
         elif key == "prod":
             key = prod
         else:
-            raise Exception(f"Invalid key in _update_msg_store: {key}"
+            raise Exception(f"Invalid key in _update_msg_store: {key}")
         n_id, perm = key.sort()
         n_id, count = n_id.unique_consecutive(return_counts=True)
         # map each node to its interactions where it is in the key role (src, dst, or prod)
