@@ -12,6 +12,7 @@ from typing import Callable, Dict, Tuple
 import torch
 from torch import Tensor
 from torch.nn import GRUCell, RNNCell, Linear
+import torch.nn.functional as F
 
 from torch_geometric.nn.inits import zeros
 from torch_geometric.utils import scatter
@@ -48,11 +49,14 @@ class TGNPLMemory(torch.nn.Module):
         aggregator_module: Callable,
         state_updater_cell: str = "gru",
         use_inventory: bool = True,
+        debt_penalty: float = 0,
+        consumption_reward: float = 0,
         debug: bool = False,
     ):
         super().__init__()
         self.num_nodes = num_nodes
         self.num_prods = num_prods
+        self.num_firms = self.num_nodes - self.num_prods  # assume we only have firm and prod nodes
         self.raw_msg_dim = raw_msg_dim
         self.state_dim = state_dim
         self.time_dim = time_dim
@@ -63,6 +67,8 @@ class TGNPLMemory(torch.nn.Module):
         self.aggr_module = aggregator_module
         self.time_enc = TimeEncoder(time_dim)
         self.use_inventory = use_inventory
+        self.debt_penalty = debt_penalty
+        self.consumption_reward = consumption_reward
         self.debug = debug
         
         if state_updater_cell == "gru":  # for TGN
@@ -76,13 +82,13 @@ class TGNPLMemory(torch.nn.Module):
             
         if self.use_inventory:
             self.memory_dim = self.state_dim + self.num_prods
+            self.output_l = Linear(self.state_dim, self.state_dim)  # project product emb as output
+            self.input_l = Linear(self.state_dim, self.state_dim)  # project product emb as input
         else:
             self.memory_dim = self.state_dim
         self.register_buffer("memory", torch.empty(self.num_nodes, self.memory_dim))
         self.register_buffer("last_update", torch.empty(self.num_nodes, dtype=torch.long))
-        self.register_buffer("_assoc", torch.empty(self.num_nodes, dtype=torch.long))
-        if self.use_inventory:
-            self.prod_linear = Linear(self.state_dim * 2, 1)  # for pairwise attention
+        self.register_buffer("_assoc", torch.empty(self.num_nodes, dtype=torch.long))            
 
         self.msg_s_store = {}
         self.msg_d_store = {}
@@ -106,7 +112,8 @@ class TGNPLMemory(torch.nn.Module):
         self.time_enc.reset_parameters()
         self.state_updater.reset_parameters()
         if self.use_inventory:
-            self.prod_linear.reset_parameters()
+            self.output_l.reset_parameters()
+            self.input_l.reset_parameters()
         self.reset_state()
 
     def reset_state(self):
@@ -131,12 +138,12 @@ class TGNPLMemory(torch.nn.Module):
         """Returns, for all nodes :obj:`n_id`, their current memory and their
         last updated timestamp."""
         if self.training:
-            memory, last_update = self._get_updated_memory(n_id)
+            memory, last_update, inv_loss = self._get_updated_memory(n_id)
         else:
-            memory, last_update = self.memory[n_id], self.last_update[n_id]
+            memory, last_update, inv_loss = self.memory[n_id], self.last_update[n_id], 0
 
-        return memory, last_update
-
+        return memory, last_update, inv_loss
+    
     def update_state(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, raw_msg: Tensor):
         """Updates the memory with newly encountered interactions
         :obj:`(src, dst, prod, t, raw_msg)`."""
@@ -158,21 +165,30 @@ class TGNPLMemory(torch.nn.Module):
         """
         Update the stored memory and last update for nodes in n_id.
         """
-        memory, last_update = self._get_updated_memory(n_id)
+        memory, last_update, inv_loss = self._get_updated_memory(n_id)
         self.memory[n_id] = memory
         self.last_update[n_id] = last_update
 
-    def _get_updated_memory(self, n_id: Tensor) -> Tuple[Tensor, Tensor]:
+    def _get_updated_memory(self, n_id: Tensor, prod_emb: Tensor = None) -> Tuple[Tensor, Tensor]:
         """
         Get current memory and last update for nodes in n_id, using their 
         current stored interactions.
         """
-        self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
+        self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)  # used to reindex n_id from 0
         state, inventory = self.memory[n_id, :self.state_dim], self.memory[n_id, self.state_dim:]
         
         # Update inventory
         if self.use_inventory:
-            pass
+            total_consumed = self._compute_internal_consumption(n_id, self.msg_s_store, prod_emb)
+            inv_loss = self._compute_inventory_loss(inventory, total_consumed)
+            total_bought = self._compute_new_inputs(n_id, self.msg_d_store)
+            if self.debug:
+                print('Total consumed:', total_consumed)
+                print('Total loss:', inv_loss)
+                print('Total bought:', total_bought)
+            inventory = inventory - total_consumed + total_bought
+        else:
+            inv_loss = 0
         
         # Update states
         # Compute messages to suppliers in interactions where n_id is supplier
@@ -194,7 +210,7 @@ class TGNPLMemory(torch.nn.Module):
             n_id, self.msg_p_store, self.msg_p_module
         )
         if self.debug:
-            print('msg_p', msg_d)
+            print('msg_p', msg_p)
         
         # Aggregate messages
         idx = torch.cat([idx_s, idx_d, idx_p], dim=0)
@@ -214,8 +230,78 @@ class TGNPLMemory(torch.nn.Module):
         dim_size = self.last_update.size(0)
         last_update = scatter(t, idx, 0, dim_size, reduce="max")[n_id]
         
-        return memory, last_update
+        return memory, last_update, inv_loss
     
+    def _compute_internal_consumption(
+        self, n_id: Tensor, msg_store: TGNMessageStoreType, prod_emb: Tensor = None,
+    ):
+        """
+        Compute the amount consumed by suppliers, for the interactions in msg_store.
+        """
+        data = [msg_store[i] for i in n_id.tolist()]
+        src, dst, prod, t, raw_msg = list(zip(*data))  # unzip
+        
+        # Get total amount supplied per firm, product 
+        src = torch.cat(src, dim=0)
+        prod = torch.cat(prod, dim=0)
+        # we assume first n IDs are firms, followed by products
+        assert (prod >= self.num_firms).all()
+        prod = prod - self.num_firms
+        prod_onehot = F.one_hot(prod, num_classes=self.num_prods)
+        amt = torch.cat(raw_msg, dim=0)[:, :1]  # assume first feature in raw_msg is amount
+        amt = torch.clip(amt, min=1)  # amt shouldn't be smaller than 1
+        prod_onehot = prod_onehot * amt  # scale each row by amt
+        total_supplied = scatter(  # num_nodes x num_products
+            prod_onehot, src, dim=0, dim_size=self.num_nodes, reduce="sum"
+        )
+        
+        if prod_emb is None:  # get product representations from memory
+            prod_emb = self.memory[self.num_firms:, :self.state_dim]
+        else:  # received product embeddings
+            assert prod_emb.size(0) == self.num_prods
+        output_emb = self.output_l(prod_emb)  # num_products x emb_dim
+        input_emb = self.input_l(prod_emb)  # num_products x emb_dim
+        att_weights = output_emb @ input_emb.T  # num_products x num_products
+        att_weights = torch.nn.ReLU(inplace=False)(att_weights)
+        total_consumed = total_supplied @ att_weights  # num_nodes x num_products
+        return total_consumed[n_id]
+    
+    def _compute_inventory_loss(self, inventory: Tensor, consumption: Tensor):
+        """
+        Compute loss on inventory and consumption. Want to maximize consumption while minimizing
+        wherever consumption is larger than inventory.
+        """
+        diff = inventory - consumption  # num_nodes x num_prod
+        total_debt = -torch.sum(diff[diff < 0], dim=-1)  # sum of entries where consumption is greater than inventory
+        total_consumption = torch.sum(consumption, dim=-1)
+        loss = (self.debt_penalty * total_debt) - (self.consumption_reward * total_consumption)
+        return loss.sum()
+        
+    def _compute_new_inputs(
+        self, n_id: Tensor, msg_store: TGNMessageStoreType
+    ):
+        """
+        Compute the amount received by buyers, for the interactions in msg_store.
+        """
+        data = [msg_store[i] for i in n_id.tolist()]
+        src, dst, prod, t, raw_msg = list(zip(*data))  # unzip
+        
+        # Get total amount received per firm, product 
+        dst = torch.cat(dst, dim=0)
+        prod = torch.cat(prod, dim=0)
+        # we assume first n IDs are firms, followed by products
+        assert (prod >= self.num_firms).all()
+        prod = prod - self.num_firms
+        prod_onehot = F.one_hot(prod, num_classes=self.num_prods)
+        amt = torch.cat(raw_msg, dim=0)[:, :1]  # assume first feature in raw_msg is amount
+        amt = torch.clip(amt, min=1)  # amt shouldn't be smaller than 1
+        prod_onehot = prod_onehot * amt  # scale each row by amt
+        total_received = scatter(  # num_nodes x num_products
+            prod_onehot, dst, dim=0, dim_size=self.num_nodes, reduce="sum"
+        )
+        return total_received[n_id]
+    
+        
     def _compute_msg(
         self, n_id: Tensor, msg_store: TGNMessageStoreType, msg_module: Callable
     ):
@@ -236,7 +322,7 @@ class TGNPLMemory(torch.nn.Module):
 
         msg = msg_module(self.memory[src], self.memory[dst], self.memory[prod], raw_msg, t_enc)
 
-        return msg, t, src, prod, dst
+        return msg, t, src, dst, prod
     
     def _update_msg_store(
         self,

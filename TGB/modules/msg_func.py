@@ -8,13 +8,13 @@ Reference:
 import torch
 from torch import Tensor
 
-class IdentityMessageTGNPL(torch.nn.Module):
+class TGNPLMessage(torch.nn.Module):
     def __init__(self, raw_msg_dim: int, memory_dim: int, time_dim: int):
         super().__init__()
-        self.out_channels = raw_msg_dim + 3 * memory_dim + time_dim
+        self.out_channels = raw_msg_dim + (3 * memory_dim) + time_dim
 
-    def forward(self, z_src: Tensor, z_prod: Tensor, z_dst: Tensor, raw_msg: Tensor, t_enc: Tensor):
-        return torch.cat([z_src, z_prod, z_dst, raw_msg, t_enc], dim=-1)
+    def forward(self, z_src: Tensor, z_dst: Tensor, z_prod: Tensor, raw_msg: Tensor, t_enc: Tensor):
+        return torch.cat([z_src, z_dst, z_prod, raw_msg, t_enc], dim=-1)
 
 class IdentityMessage(torch.nn.Module):
     def __init__(self, raw_msg_dim: int, memory_dim: int, time_dim: int):
