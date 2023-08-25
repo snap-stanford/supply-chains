@@ -154,7 +154,7 @@ for pos_batch in val_loader:
         p_src, p_prod, p_dst = (p.cpu().numpy()[idx] for p in [pos_src, pos_prod, pos_dst])
         ns_samples = len(neg_batch) // 3
         src = torch.tensor([p_src] + neg_batch[:ns_samples] + [p_src for _ in range(ns_samples * 2)], device = device)
-        prod = torch.tensor([p_prod] + [p_prod for _ in range(ns_samples)] + neg_batch[ns_samples:ns_samples * 2] + [p_prod for _ in range(ns_samples * 2)], device = device)
+        prod = torch.tensor([p_prod] + [p_prod for _ in range(ns_samples)] + neg_batch[ns_samples:ns_samples * 2] + [p_prod for _ in range(ns_samples)], device = device)
         dest = torch.tensor([p_dst] + [p_dst for _ in range(ns_samples * 2)] + neg_batch[ns_samples * 2:], device = device)
 
         print(src)
@@ -162,17 +162,6 @@ for pos_batch in val_loader:
         print(dest)
         print(idx, [(s.item(),p.item(),d.item()) for s, p, d in zip(src, prod, dest)], len([(s,p,d) for s, p, d in zip(src, prod, dest)]))
         break
-         
-        """
-        src = torch.full((1 + len(neg_batch),), pos_src[idx], device=device)
-        dst = torch.tensor(
-            np.concatenate(
-                ([np.array([pos_dst.cpu().numpy()[idx]]), np.array(neg_batch)]),
-                axis=0,
-            ),
-            device=device,
-        )
-        """
     break
 
 
