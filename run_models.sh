@@ -1,4 +1,4 @@
-python register_data.py --csv_file ./data/daily_transactions_all_years.csv --dataset_name tgbl-supplychains --metric total_amount --dir TGB/tgb/datasets/tgbl_supplychains --logscale
+python register_data.py --csv_file ./data/daily_transactions_all_years.csv --dataset_name tgbl-supplychains --metric total_amount --dir ./TGB/tgb/datasets/tgbl_supplychains --logscale
 
 #train the model
 cd TGB

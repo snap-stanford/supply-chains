@@ -1,5 +1,5 @@
 """
-Link Prediction with a TGN model with Early Stopping
+Dynamic Link Prediction with a TGN model with Early Stopping
 Reference: 
     - https://github.com/pyg-team/pytorch_geometric/blob/master/examples/tgn.py
 
@@ -191,23 +191,42 @@ start_overall = timeit.default_timer()
 args, _ = get_args()
 print("INFO: Arguments:", args)
 
-DATA = "tgbl-wiki"
-LR = args.lr
-BATCH_SIZE = args.bs
-K_VALUE = args.k_value  
-NUM_EPOCH = args.num_epoch
-SEED = args.seed
-MEM_DIM = args.mem_dim
-TIME_DIM = args.time_dim
-EMB_DIM = args.emb_dim
-TOLERANCE = args.tolerance
-PATIENCE = args.patience
-NUM_RUNS = args.num_run
-NUM_NEIGHBORS = 10
+# start a new wandb run to track this script
 WANDB = args.wandb
+if WANDB:
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project=WANDB_PROJECT,
+        entity=WANDB_TEAM,
+        resume="allow",
 
+        # track hyperparameters and run metadata
+        config=args
+    )
+    config = wandb.config
 
+DATA = config.data if WANDB else args.data
+LR = config.lr if WANDB else args.lr
+BATCH_SIZE = config.bs if WANDB else args.bs
+K_VALUE = config.k_value if WANDB else args.k_value  
+NUM_EPOCH = config.num_epoch if WANDB else args.num_epoch
+SEED = config.seed if WANDB else args.seed
+MEM_DIM = config.mem_dim if WANDB else args.mem_dim
+TIME_DIM = config.time_dim if WANDB else args.time_dim
+EMB_DIM = config.emb_dim if WANDB else args.emb_dim
+TOLERANCE = config.tolerance if WANDB else args.tolerance
+PATIENCE = config.patience if WANDB else args.patience
+NUM_RUNS = config.num_run if WANDB else args.num_run
+assert (NUM_RUNS == 1)
+
+NUM_NEIGHBORS = 10
 MODEL_NAME = 'TGN'
+if WANDB:
+    wandb.summary["num_neighbors"] = NUM_NEIGHBORS
+    wandb.summary["model_name"] = MODEL_NAME
+
+UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
+UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{UNIQUE_TIME}"
 # ==========
 
 # set the device
@@ -282,8 +301,9 @@ if not osp.exists(results_path):
     os.mkdir(results_path)
     print('INFO: Create directory {}'.format(results_path))
 Path(results_path).mkdir(parents=True, exist_ok=True)
-results_filename = f'{results_path}/{MODEL_NAME}_{DATA}_results.json'
+results_filename = f'{results_path}/{UNIQUE_NAME}_results.json'
 
+<<<<<<< HEAD:TGB/examples/linkproppred/tgbl-wiki/tgn.py
 for run_idx in range(NUM_RUNS):
     # start a new wandb run to track this script
     if WANDB:
@@ -314,6 +334,9 @@ for run_idx in range(NUM_RUNS):
             }
         )
     
+=======
+for run_idx in range(NUM_RUNS):    
+>>>>>>> c3802ac9aa11a7b57e9fc91900a1ce018b802b3f:TGB/examples/linkproppred/general/tgn.py
     print('-------------------------------------------------------------------------------')
     print(f"INFO: >>>>> Run: {run_idx} <<<<<")
     start_run = timeit.default_timer()
@@ -324,7 +347,7 @@ for run_idx in range(NUM_RUNS):
 
     # define an early stopper
     save_model_dir = f'{osp.dirname(osp.abspath(__file__))}/saved_models/'
-    save_model_id = f'{MODEL_NAME}_{DATA}_{SEED}_{run_idx}'
+    save_model_id = f'{UNIQUE_NAME}_{run_idx}'
     early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
                                     tolerance=TOLERANCE, patience=PATIENCE)
 
@@ -382,6 +405,7 @@ for run_idx in range(NUM_RUNS):
     test_time = timeit.default_timer() - start_test
     print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
     if WANDB:
+        wandb.summary["metric"] = metric
         wandb.summary["best_epoch"] = early_stopper.best_epoch
         wandb.summary["perf_metric_test"] = perf_metric_test
         wandb.summary["elapsed_time_test"] = test_time
@@ -400,7 +424,7 @@ for run_idx in range(NUM_RUNS):
 
     print(f"INFO: >>>>> Run: {run_idx}, elapsed time: {timeit.default_timer() - start_run: .4f} <<<<<")
     print('-------------------------------------------------------------------------------')
-    wandb.finish()
 
 print(f"Overall Elapsed Time (s): {timeit.default_timer() - start_overall: .4f}")
 print("==============================================================")
+wandb.finish()

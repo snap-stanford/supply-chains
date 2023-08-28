@@ -2,7 +2,7 @@
 Train a TG model and evaluate it with TGB package
 NOTE:  The task is Transductive Dynamic Link Prediction
 """
-
+import wandb
 import logging
 import timeit
 import time
@@ -33,6 +33,7 @@ from utils.DataLoader import get_idx_data_loader, get_link_prediction_data, get_
 from utils.EarlyStopping import EarlyStopping
 from utils.load_configs import get_link_prediction_args
 
+from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
 from evaluation.tgb_evaluate_LPP import eval_LPP_TGB
 
@@ -42,6 +43,30 @@ def main():
     # get arguments
     args = get_link_prediction_args(is_evaluation=False)
 
+    # start a new wandb run to track this script
+    WANDB = args.wandb
+    if WANDB:
+        wandb.init(
+            # set the wandb project where this run will be logged
+            project=WANDB_PROJECT,
+            entity=WANDB_TEAM,
+            resume="allow",
+
+            # track hyperparameters and run metadata
+            config=args
+        )
+        args = wandb.config
+        assert (args.num_runs == 1)
+        print(f"Debugging: num epochs is {args.num_epochs} and num runs is {args.num_runs}\n")
+    
+    # Create unique identifier for each run
+    UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"  
+    UNIQUE_NAME = ""
+    for arg in vars(args):
+        if arg == "_items":
+            dict_ = getattr(args, arg)
+            UNIQUE_NAME = '_'.join([str(dict_[key]) for key in dict_])
+    
     # get data for training, validation and testing
     node_raw_features, edge_raw_features, full_data, train_data, val_data, test_data, dataset = \
         get_link_pred_data_TRANS_TGB(dataset_name=args.dataset_name)
@@ -76,16 +101,17 @@ def main():
         start_run = timeit.default_timer()
         set_random_seed(seed=args.seed+run)
 
-        args.save_model_name = f'{args.model_name}_{args.dataset_name}_seed_{args.seed}_run_{run}'
+        # args.save_model_name = f"{args.model_name}_{args.dataset_name}_seed_{args.seed}_run_{run}"
+        args.save_model_name = UNIQUE_NAME
 
         # set up logger
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger()
         logger.setLevel(logging.DEBUG)
-        os.makedirs(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_model_name}/", exist_ok=True)
+        os.makedirs(f"./logs/{args.model_name}/{args.dataset_name}/", exist_ok=True)
         # create file handler that logs debug and higher level messages
         log_start_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d_%H:%M:%S")
-        fh = logging.FileHandler(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_model_name}/{str(log_start_time)}.log")
+        fh = logging.FileHandler(f"./logs/{args.model_name}/{args.dataset_name}/{args.save_model_name}_{str(log_start_time)}.log")
         fh.setLevel(logging.DEBUG)
         # create console handler with a higher log level
         ch = logging.StreamHandler()
@@ -149,7 +175,7 @@ def main():
 
         model = convert_to_gpu(model, device=args.device)
 
-        save_model_folder = f"./saved_models/{args.model_name}/{args.dataset_name}/{args.save_model_name}/"
+        save_model_folder = f"./saved_models/{args.model_name}/{args.dataset_name}/"
         shutil.rmtree(save_model_folder, ignore_errors=True)
         os.makedirs(save_model_folder, exist_ok=True)
 
@@ -189,6 +215,7 @@ def main():
                 if args.model_name in ['TGAT', 'CAWN', 'TCL']:
                     # get temporal embedding of source and destination nodes
                     # two Tensors, with shape (batch_size, node_feat_dim)
+                    print(f"Debugging: we are using {args.model_name}")
                     batch_src_node_embeddings, batch_dst_node_embeddings = \
                         model[0].compute_src_dst_node_temporal_embeddings(src_node_ids=batch_src_node_ids,
                                                                           dst_node_ids=batch_dst_node_ids,
@@ -227,6 +254,7 @@ def main():
                 elif args.model_name in ['GraphMixer']:
                     # get temporal embedding of source and destination nodes
                     # two Tensors, with shape (batch_size, node_feat_dim)
+                    print("Debugging: we are using GraphMixer")
                     batch_src_node_embeddings, batch_dst_node_embeddings = \
                         model[0].compute_src_dst_node_temporal_embeddings(src_node_ids=batch_src_node_ids,
                                                                           dst_node_ids=batch_dst_node_ids,
@@ -291,16 +319,27 @@ def main():
                                       split_mode='val', k_value=10, num_neighbors=args.num_neighbors, time_gap=args.time_gap)
             val_perf_list.append(val_metric)
             
+            # log metric to logger, wandb
             epoch_time = timeit.default_timer() - start_epoch
             logger.info(f'Epoch: {epoch + 1}, learning rate: {optimizer.param_groups[0]["lr"]}, train loss: {np.mean(train_losses):.4f}, elapsed time (s): {epoch_time:.4f}')
+            if WANDB:
+                WANDB_DICT = {}
+                WANDB_DICT.update({"loss": np.mean(train_losses),
+                                    "elapsed_time_train_val": epoch_time
+                                    })
             for metric_name in train_metrics[0].keys():
                 logger.info(f'train {metric_name}, {np.mean([train_metric[metric_name] for train_metric in train_metrics]):.4f}')
+                if WANDB:
+                    WANDB_DICT.update({f"train {metric_name}": np.mean([train_metric[metric_name] for train_metric in train_metrics])})
             logger.info(f'Validation: {metric}: {val_metric: .4f}')
+            if WANDB:
+                WANDB_DICT.update({"perf_metric_val": val_metric})
+                wandb.log(WANDB_DICT)
 
             # select the best model based on all the validate metrics
             val_metric_indicator = [(metric, val_metric, True)]
             early_stop = early_stopping.step(val_metric_indicator, model)
-
+            
             if early_stop:
                 break
 
@@ -323,6 +362,10 @@ def main():
         test_time = timeit.default_timer() - start_test
         logger.info(f'Test elapsed time (s): {test_time:.4f}')
         logger.info(f'Test: {metric}: {test_metric: .4f}')
+        if WANDB:
+            wandb.summary["metric"] = metric
+            wandb.summary["perf_metric_test"] = test_metric
+            wandb.summary["elapsed_time_test"] = test_time
 
         # avoid the overlap of logs
         if run < args.num_runs - 1:
@@ -350,6 +393,8 @@ def main():
             file.write(result_json)
 
         logger.info(f"run {run} total elapsed time (s): {timeit.default_timer() - start_run:.4f}")
+    
+    wandb.finish()
 
 if __name__ == "__main__":
 
