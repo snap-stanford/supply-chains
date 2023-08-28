@@ -11,7 +11,7 @@ from typing import Callable, Dict, Tuple
 
 import torch
 from torch import Tensor
-from torch.nn import GRUCell, RNNCell, Linear
+from torch.nn import GRUCell, RNNCell, Linear, Parameter
 import torch.nn.functional as F
 
 from torch_geometric.nn.inits import zeros
@@ -49,6 +49,7 @@ class TGNPLMemory(torch.nn.Module):
         aggregator_module: Callable,
         state_updater_cell: str = "gru",
         use_inventory: bool = True,
+        learn_att_direct: bool = False,
         debt_penalty: float = 0,
         consumption_reward: float = 0,
         debug: bool = False,
@@ -67,6 +68,7 @@ class TGNPLMemory(torch.nn.Module):
         self.aggr_module = aggregator_module
         self.time_enc = TimeEncoder(time_dim)
         self.use_inventory = use_inventory
+        self.learn_att_direct = learn_att_direct
         self.debt_penalty = debt_penalty
         self.consumption_reward = consumption_reward
         self.debug = debug
@@ -82,8 +84,10 @@ class TGNPLMemory(torch.nn.Module):
             
         if self.use_inventory:
             self.memory_dim = self.state_dim + self.num_prods
-            self.output_l = Linear(self.state_dim, self.state_dim)  # project product emb as output
-            self.input_l = Linear(self.state_dim, self.state_dim)  # project product emb as input
+            if self.learn_att_direct:
+                self.att_weights = Parameter(torch.empty(self.num_prods, self.num_prods))
+            else:
+                self.prod_project = Linear(self.state_dim, self.state_dim*2)  # project product emb as output/input
         else:
             self.memory_dim = self.state_dim
         self.register_buffer("memory", torch.empty(self.num_nodes, self.memory_dim))
@@ -112,8 +116,8 @@ class TGNPLMemory(torch.nn.Module):
         self.time_enc.reset_parameters()
         self.state_updater.reset_parameters()
         if self.use_inventory:
-            self.output_l.reset_parameters()
-            self.input_l.reset_parameters()
+            if not self.learn_att_direct:
+                self.prod_project.reset_parameters()
         self.reset_state()
 
     def reset_state(self):
@@ -161,6 +165,23 @@ class TGNPLMemory(torch.nn.Module):
             self._update_msg_store(src, dst, prod, t, raw_msg, self.msg_p_store, key="prod")
             self._update_memory(n_id)
     
+    def get_prod_attention(self, prod_emb: Tensor = None):
+        """
+        Get attention weights between products.
+        """
+        if self.learn_att_direct:
+            att_weights = self.att_weights
+        else:
+            if prod_emb is None:  # get product representations from memory
+                prod_emb = self.memory[self.num_firms:, :self.state_dim]
+            else:  # received product embeddings
+                assert prod_emb.size == (self.num_prods, self.state_dim)
+            projected = self.prod_project(prod_emb)
+            output_emb = projected[:, :self.state_dim]  # num_products x state_dim
+            input_emb = projected[:, self.state_dim:]  # num_products x state_dim
+            att_weights = output_emb @ input_emb.T  # num_products x num_products
+        return torch.nn.ReLU(inplace=False)(att_weights)
+        
     def _update_memory(self, n_id: Tensor):
         """
         Update the stored memory and last update for nodes in n_id.
@@ -177,20 +198,6 @@ class TGNPLMemory(torch.nn.Module):
         self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)  # used to reindex n_id from 0
         state, inventory = self.memory[n_id, :self.state_dim], self.memory[n_id, self.state_dim:]
         
-        # Update inventory
-        if self.use_inventory:
-            total_consumed = self._compute_internal_consumption(n_id, self.msg_s_store, prod_emb)
-            inv_loss = self._compute_inventory_loss(inventory, total_consumed)
-            total_bought = self._compute_new_inputs(n_id, self.msg_d_store)
-            if self.debug:
-                print('Total consumed:', total_consumed)
-                print('Total loss:', inv_loss)
-                print('Total bought:', total_bought)
-            inventory = inventory - total_consumed + total_bought
-        else:
-            inv_loss = 0
-        
-        # Update states
         # Compute messages to suppliers in interactions where n_id is supplier
         msg_s, t_s, idx_s, _, _ = self._compute_msg(
             n_id, self.msg_s_store, self.msg_s_module
@@ -220,16 +227,29 @@ class TGNPLMemory(torch.nn.Module):
         if self.debug:
             print('aggr', aggr)
         
-        # Get local copy of updated memory
+        # Get local copy of updated state
         state = self.state_updater(aggr, state)
-        memory = torch.cat([state, inventory], dim=1)
-        if self.debug:
-            print('memory', memory)
             
         # Get local copy of updated `last_update`.
         dim_size = self.last_update.size(0)
         last_update = scatter(t, idx, 0, dim_size, reduce="max")[n_id]
         
+        # Get local copy of updated inventory
+        if self.use_inventory:
+            total_consumed = self._compute_internal_consumption(n_id, self.msg_s_store, prod_emb)
+            inv_loss = self._compute_inventory_loss(inventory, total_consumed)
+            total_bought = self._compute_new_inputs(n_id, self.msg_d_store)
+            if self.debug:
+                print('Total consumed:', total_consumed)
+                print('Total loss:', inv_loss)
+                print('Total bought:', total_bought)
+            inventory = inventory - total_consumed + total_bought
+        else:
+            inv_loss = 0
+            
+        memory = torch.cat([state, inventory], dim=1)
+        if self.debug:
+            print('memory', memory)
         return memory, last_update, inv_loss
     
     def _compute_internal_consumption(
@@ -254,15 +274,7 @@ class TGNPLMemory(torch.nn.Module):
         total_supplied = scatter(  # num_nodes x num_products
             prod_onehot, src, dim=0, dim_size=self.num_nodes, reduce="sum"
         )
-        
-        if prod_emb is None:  # get product representations from memory
-            prod_emb = self.memory[self.num_firms:, :self.state_dim]
-        else:  # received product embeddings
-            assert prod_emb.size(0) == self.num_prods
-        output_emb = self.output_l(prod_emb)  # num_products x emb_dim
-        input_emb = self.input_l(prod_emb)  # num_products x emb_dim
-        att_weights = output_emb @ input_emb.T  # num_products x num_products
-        att_weights = torch.nn.ReLU(inplace=False)(att_weights)
+        att_weights = self.get_prod_attention(prod_emb)
         total_consumed = total_supplied @ att_weights  # num_nodes x num_products
         return total_consumed[n_id]
     
