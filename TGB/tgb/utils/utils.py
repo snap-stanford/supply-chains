@@ -7,6 +7,7 @@ import sys
 import argparse
 import json
 import io
+
 import datetime
 import pytz
 
@@ -92,4 +93,3 @@ def save_results(new_results: dict, filename: str):
 
 def current_pst_time():
     return pytz.utc.localize(datetime.datetime.utcnow()).astimezone(pytz.timezone('US/Pacific'))
-

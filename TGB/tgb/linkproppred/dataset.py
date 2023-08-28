@@ -7,8 +7,9 @@ import zipfile
 import requests
 from clint.textui import progress
 
-from tgb.linkproppred.negative_sampler import NegativeEdgeSampler
+from tgb.linkproppred.negative_sampler import NegativeEdgeSampler, NegativeHyperEdgeSampler
 from tgb.utils.info import PROJ_DIR, DATA_URL_DICT, DATA_EVAL_METRIC_DICT, BColors
+
 from tgb.utils.pre_process import (
     csv_to_pd_data,
     process_node_feat,
@@ -16,6 +17,7 @@ from tgb.utils.pre_process import (
     csv_to_pd_data_rc,
     load_edgelist_wiki,
     csv_to_pd_data_hitachi,
+    convert_hypergraph
 )
 from tgb.utils.utils import save_pkl, load_pkl
 
@@ -48,6 +50,8 @@ class LinkPropPredDataset(object):
         # check if the evaluatioin metric are specified
         if self.name in DATA_EVAL_METRIC_DICT:
             self.metric = DATA_EVAL_METRIC_DICT[self.name]
+        elif "tgbl-supplychains" in self.name or "tgbl-hypergraph" in self.name:
+            self.metric = "mrr"
         else:
             self.metric = None
             print(
@@ -80,7 +84,7 @@ class LinkPropPredDataset(object):
         self._val_data = None
         self._test_data = None
 
-        if (self.name != "tgbl-supplychains"):
+        if ("tgbl-supplychains" not in self.name or "tgbl-hypergraph" not in self.name):
             self.download()
         
         # check if the root directory exists, if not create it
@@ -91,11 +95,17 @@ class LinkPropPredDataset(object):
             raise FileNotFoundError(f"Directory not found at {self.root}")
 
         if preprocess:
-            self.pre_process()
+            self.pre_process(isHyperGraph = "tgbl-hypergraph" in self.name)
 
-        self.ns_sampler = NegativeEdgeSampler(
-            dataset_name=self.name, strategy="hist_rnd"
-        )
+        #TODO: adjust the Negative Edge Sampler to work with the hypergraph data
+        if ("tgbl-hypergraph" in self.name):
+            self.ns_sampler = NegativeHyperEdgeSampler(
+                dataset_name=self.name, strategy="hist_rnd"
+            )
+        else:
+            self.ns_sampler = NegativeEdgeSampler(
+                dataset_name=self.name, strategy="hist_rnd"
+            )
 
     def download(self):
         """
@@ -185,10 +195,12 @@ class LinkPropPredDataset(object):
                 df, edge_feat, node_ids = csv_to_pd_data_sc(self.meta_dict["fname"])
             elif self.name == "tgbl-wiki":
                 df, edge_feat, node_ids = load_edgelist_wiki(self.meta_dict["fname"])
-            elif self.name == "tgbl-supplychains":
+            elif "tgbl-supplychains" in self.name:
                 #TODO: change this 
                 print(self.meta_dict["fname"])
                 df, edge_feat, node_ids = csv_to_pd_data_hitachi(self.meta_dict["fname"])
+            elif "tgbl-hypergraph" in self.name:
+                df, edge_feat, node_ids = convert_hypergraph(self.meta_dict["fname"])
 
             save_pkl(edge_feat, OUT_EDGE_FEAT)
             df.to_pickle(OUT_DF)
@@ -198,7 +210,7 @@ class LinkPropPredDataset(object):
 
         return df, edge_feat, node_feat
 
-    def pre_process(self):
+    def pre_process(self, isHyperGraph = False):
         """
         Pre-process the dataset and generates the splits, must be run before dataset properties can be accessed
         generates the edge data and different train, val, test splits
@@ -208,6 +220,8 @@ class LinkPropPredDataset(object):
         # check if path to file is valid
         df, edge_feat, node_feat = self.generate_processed_files()
         sources = np.array(df["u"])
+        if (isHyperGraph == True):
+            products = np.array(df["p"])
         destinations = np.array(df["i"])
         timestamps = np.array(df["ts"])
         edge_idxs = np.array(df["idx"])
@@ -220,15 +234,27 @@ class LinkPropPredDataset(object):
         self._edge_feat = edge_feat
         self._node_feat = node_feat
 
-        full_data = {
-            "sources": sources,
-            "destinations": destinations,
-            "timestamps": timestamps,
-            "edge_idxs": edge_idxs,
-            "edge_feat": edge_feat,
-            "w": weights,
-            "edge_label": edge_label,
-        }
+        if (isHyperGraph == True):
+            full_data = {
+                "sources": sources,
+                "products": products,
+                "destinations": destinations,
+                "timestamps": timestamps,
+                "edge_idxs": edge_idxs,
+                "edge_feat": edge_feat,
+                "w": weights,
+                "edge_label": edge_label,
+            }
+        else:
+            full_data = {
+                "sources": sources,
+                "destinations": destinations,
+                "timestamps": timestamps,
+                "edge_idxs": edge_idxs,
+                "edge_feat": edge_feat,
+                "w": weights,
+                "edge_label": edge_label,
+            }
         self._full_data = full_data
         _train_mask, _val_mask, _test_mask = self.generate_splits(full_data)
         self._train_mask = _train_mask
@@ -366,7 +392,7 @@ class LinkPropPredDataset(object):
 
 
 def main():
-    name = "tgbl-supplychains" 
+    name = "tgbl-hypergraph" 
     dataset = LinkPropPredDataset(name=name, root="datasets", preprocess=True)
 
     dataset.node_feat
@@ -374,9 +400,22 @@ def main():
     dataset.full_data
     dataset.full_data["edge_idxs"]
     dataset.full_data["sources"]
+    dataset.full_data["products"]
     dataset.full_data["destinations"]
     dataset.full_data["timestamps"]
     dataset.full_data["edge_label"]
+
+    dataset.load_val_ns()
+    ns = dataset.negative_sampler
+
+    #sample test with the hypergraph negative edge sampler
+    pos_src = np.array([2024, 6544, 7093])
+    pos_prod = np.array([7331, 9914, 9170])
+    pos_dst = np.array([4608, 1371, 1310])
+    pos_timestamp = np.array([273, 273])
+    
+    negatives = ns.query_batch(pos_src, pos_prod, pos_dst, pos_timestamp, split_mode = "val")
+    print(negatives[0], "\n", np.array(negatives[0]).reshape(3,-1))
 
 
 if __name__ == "__main__":

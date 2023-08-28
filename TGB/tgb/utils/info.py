@@ -6,7 +6,6 @@ General space to store global information used elsewhere such as url links, eval
 """
 PROJ_DIR = osp.dirname(osp.abspath(os.path.join(__file__, os.pardir))) + "/"
 
-
 class BColors:
     """
     A class to change the colors of the strings.
@@ -45,9 +44,14 @@ DATA_EVAL_METRIC_DICT = {
     "tgbn-trade": "ndcg",
     "tgbn-genre": "ndcg",
     "tgbn-reddit": "ndcg",
-    "tgbl-supplychains": "mrr"
+    "tgbl-supplychains": "mrr",
+    "tgbl-hypergraph": "mrr",
+    "tgbn-hypergraph": "ndcg",
+    "tgbn-supplychains": "ndcg",
 }
 
+DATA_EVAL_METRIC_DICT.update(
+    {f"tgbl-supplychains{prod}{year}": "mrr" for year in list(range(2019, 2022 + 1)) + ["all_years"] for prod in ["","product"]})
 
 DATA_NUM_CLASSES = {
     "tgbn-trade": 255,

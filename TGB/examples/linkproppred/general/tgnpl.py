@@ -36,10 +36,11 @@ from modules.memory_module import TGNPLMemory
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset
 
-
 # ==========
 # ========== Define helper function...
 # ==========
+
+import json
 
 def train():
     r"""
@@ -84,6 +85,39 @@ def train():
             device=device,
         )
 
+<<<<<<< HEAD:TGB/examples/linkproppred/tgbl-supplychains/tgn.py
+        
+        
+        if (bipartite == False):
+            # Sample negative destination nodes.
+            neg_dst = torch.randint(
+                min_dst_idx,
+                max_dst_idx + 1,
+                (src.size(0),),
+                dtype=torch.long,
+                device=device,
+            )
+        else:
+            neg_dst = torch.zeros((src.size(0),), dtype = torch.long, device = device)
+            num_products = int(torch.sum(src >= product_min_idx).item())
+            num_firms = int(torch.sum(src < product_min_idx).item())
+            neg_dst[src >= product_min_idx] = torch.randint(min_dst_idx, product_min_idx, (num_products,), dtype = torch.long,
+                                                           device = device)
+            neg_dst[src < product_min_idx] = torch.randint(product_min_idx, max_dst_idx + 1, (num_firms,), dtype = torch.long,
+                                                           device = device)
+
+            
+            #print(src >= product_min_idx) #get products, (min_dst_idx, max_dst_idx + 1)
+            #print(product_min_idx)
+            #print(neg_dst)
+            #print(src)
+            #print(pos_dst)
+            #raise ValueError("bruh")
+
+
+        n_id = torch.cat([src, pos_dst, neg_dst]).unique()
+        n_id, edge_index, e_id = neighbor_loader(n_id)
+=======
         neg_dst = torch.randint(
             min_dst_idx,
             max_dst_idx + 1,
@@ -97,6 +131,7 @@ def train():
         # 'n_id' indexes both firm and product nodes (positive and negative)
         # 'edge_index' are relevant firm-product and product-firm edges
         n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
+>>>>>>> c3802ac9aa11a7b57e9fc91900a1ce018b802b3f:TGB/examples/linkproppred/general/tgnpl.py
         assoc[n_id] = torch.arange(n_id.size(0), device=device)
         
         # Get updated memory of all nodes involved in the computation.
@@ -204,18 +239,89 @@ def test(loader, neg_sampler, split_mode):
 
     return perf_metrics
 
-# ==========
-# ==========
-# ==========
+import argparse 
+import sys
 
+def get_tgn_args():
+    parser = argparse.ArgumentParser('*** TGB ***')
+    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-supplychains')
+    parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
+    parser.add_argument('--bs', type=int, help='Batch size', default=200)
+    parser.add_argument('--k_value', type=int, help='k_value for computing ranking metrics', default=10)
+    parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=50)
+    parser.add_argument('--seed', type=int, help='Random seed', default=1)
+    parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=100)
+    parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
+    parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=100)
+    parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
+    parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
+    parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
+    parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
+    parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
+
+    try:
+        args = parser.parse_args()
+        defaults = parser.parse_args([])
+    
+    except:
+        parser.print_help()
+        sys.exit(0)
+    return args, defaults, sys.argv
+
+def compare_args(args, defaults): 
+    #compares deviations of the parsed arguments from the defaults (for labeling the checkpoints
+    #& results folder succinctly) 
+    args_dict = vars(args)
+    defaults_dict = vars(defaults)
+    return {key: value for key,value in args_dict.items() if (
+        key not in defaults_dict or defaults_dict[key] != args_dict[key])}
+    
+# ==========
+# ==========
+# ==========
 
 # Start...
 start_overall = timeit.default_timer()
 
 # ========== set parameters...
-args, _ = get_args()
-print("INFO: Arguments:", args)
+args, defaults, _ = get_tgn_args()
+labeling_args = compare_args(args, defaults)
+MODEL_NAME = 'TGN'
 
+<<<<<<< HEAD:TGB/examples/linkproppred/tgbl-supplychains/tgn.py
+FOLDER_NAME_HDR = f"model={MODEL_NAME}"
+for arg_name in sorted(list(labeling_args.keys())):
+    arg_value = labeling_args[arg_name]
+    FOLDER_NAME_HDR += f"_{arg_name}={arg_value}"
+    
+#print("INFO: Arguments:", args)
+#print(FOLDER_NAME_HDR)
+#raise ValueError("bruh")
+
+""" modify this to accept addtional args for dataset name """
+DATA = args.dataset
+LR = args.lr
+BATCH_SIZE = args.bs
+K_VALUE = args.k_value  
+NUM_EPOCH = args.num_epoch
+SEED = args.seed
+MEM_DIM = args.mem_dim
+TIME_DIM = args.time_dim
+EMB_DIM = args.emb_dim
+TOLERANCE = args.tolerance
+PATIENCE = args.patience
+NUM_RUNS = args.num_run
+NUM_NEIGHBORS = 10
+bipartite = args.bipartite 
+
+#preprocessing for the bipartite graph 
+DATA_FOLDER_NAME = DATA.replace("-","_")
+metadata_path = f"./tgb/datasets/{DATA_FOLDER_NAME}/{DATA}_meta.json"
+with open(metadata_path,"r") as file:
+    metadata_supplychains = json.load(file) 
+    product_min_idx = metadata_supplychains["product_threshold"]
+
+=======
 # start a new wandb run to track this script
 WANDB = args.wandb
 if WANDB:
@@ -252,6 +358,7 @@ if WANDB:
 
 UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
 UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{UNIQUE_TIME}"
+>>>>>>> c3802ac9aa11a7b57e9fc91900a1ce018b802b3f:TGB/examples/linkproppred/general/tgnpl.py
 # ==========
 
 # set the device
@@ -325,7 +432,7 @@ evaluator = Evaluator(name=DATA)
 neg_sampler = dataset.negative_sampler
 
 # for saving the results...
-results_path = f'{osp.dirname(osp.abspath(__file__))}/saved_results'
+results_path = f'{osp.dirname(osp.abspath(__file__))}/{FOLDER_NAME_HDR}_saved_results'
 if not osp.exists(results_path):
     os.mkdir(results_path)
     print('INFO: Create directory {}'.format(results_path))
@@ -342,8 +449,13 @@ for run_idx in range(NUM_RUNS):
     set_random_seed(run_idx + SEED)
 
     # define an early stopper
+<<<<<<< HEAD:TGB/examples/linkproppred/tgbl-supplychains/tgn.py
+    save_model_dir = f'{osp.dirname(osp.abspath(__file__))}/{FOLDER_NAME_HDR}_saved_models/'
+    save_model_id = f'{MODEL_NAME}_{DATA}_{SEED}_{run_idx}'
+=======
     save_model_dir = f'{osp.dirname(osp.abspath(__file__))}/saved_models/'
     save_model_id = f'{UNIQUE_NAME}_{run_idx}'
+>>>>>>> c3802ac9aa11a7b57e9fc91900a1ce018b802b3f:TGB/examples/linkproppred/general/tgnpl.py
     early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
                                     tolerance=TOLERANCE, patience=PATIENCE)
 
