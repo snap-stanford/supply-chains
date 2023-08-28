@@ -4,9 +4,9 @@ Reference:
     - https://github.com/pyg-team/pytorch_geometric/blob/master/examples/tgn.py
 
 command for an example run:
-    python examples/linkproppred/tgbl-wiki/tgn.py --data "tgbl-wiki" --num_run 1 --seed 1
+    python examples/linkproppred/tgbl-review/tgn.py --data "tgbl-review" --num_run 1 --seed 1
 """
-import wandb
+
 import math
 import timeit
 
@@ -25,14 +25,14 @@ from torch_geometric.loader import TemporalDataLoader
 from torch_geometric.nn import TransformerConv
 
 # internal imports
-from tgb.utils.utils import *
+from tgb.utils.utils import get_args, set_random_seed, save_results
 from tgb.linkproppred.evaluate import Evaluator
-from modules.decoder import LinkPredictorTGNPL
+from modules.decoder import LinkPredictor
 from modules.emb_module import GraphAttentionEmbedding
-from modules.msg_func import IdentityMessageTGNPL
+from modules.msg_func import IdentityMessage
 from modules.msg_agg import LastAggregator
-from modules.neighbor_loader import LastNeighborLoaderTGNPL
-from modules.memory_module import TGNPLMemory
+from modules.neighbor_loader import LastNeighborLoader
+from modules.memory_module import TGNMemory
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset
 
@@ -66,66 +66,60 @@ def train():
         batch = batch.to(device)
         optimizer.zero_grad()
 
-        src, prod, dst, t, msg = batch.src, batch.prod, batch.dst, batch.t, batch.msg # Note: msg is amount
+        src, pos_dst, t, msg = batch.src, batch.dst, batch.t, batch.msg
 
-        # Sample negative source, product, destination nodes.
-        neg_src = torch.randint(
-            min_src_idx,
-            max_src_idx + 1,
-            (src.size(0),),
-            dtype=torch.long,
-            device=device,
-        )
-         
-        neg_prod = torch.randint(
-            min_prod_idx,
-            max_prod_idx + 1,
-            (src.size(0),),
-            dtype=torch.long,
-            device=device,
-        )
-
-        neg_dst = torch.randint(
-            min_dst_idx,
-            max_dst_idx + 1,
-            (src.size(0),),
-            dtype=torch.long,
-            device=device,
-        )
         
-        f_id = torch.cat([src, dst, neg_src, neg_dst]).unique()
-        p_id = torch.cat([prod, neg_prod]).unique()
-        # 'n_id' indexes both firm and product nodes (positive and negative)
-        # 'edge_index' are relevant firm-product and product-firm edges
-        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
+        
+        if (bipartite == False):
+            # Sample negative destination nodes.
+            neg_dst = torch.randint(
+                min_dst_idx,
+                max_dst_idx + 1,
+                (src.size(0),),
+                dtype=torch.long,
+                device=device,
+            )
+        else:
+            neg_dst = torch.zeros((src.size(0),), dtype = torch.long, device = device)
+            num_products = int(torch.sum(src >= product_min_idx).item())
+            num_firms = int(torch.sum(src < product_min_idx).item())
+            neg_dst[src >= product_min_idx] = torch.randint(min_dst_idx, product_min_idx, (num_products,), dtype = torch.long,
+                                                           device = device)
+            neg_dst[src < product_min_idx] = torch.randint(product_min_idx, max_dst_idx + 1, (num_firms,), dtype = torch.long,
+                                                           device = device)
 
+            
+            #print(src >= product_min_idx) #get products, (min_dst_idx, max_dst_idx + 1)
+            #print(product_min_idx)
+            #print(neg_dst)
+            #print(src)
+            #print(pos_dst)
+            #raise ValueError("bruh")
+
+
+        n_id = torch.cat([src, pos_dst, neg_dst]).unique()
+        n_id, edge_index, e_id = neighbor_loader(n_id)
         assoc[n_id] = torch.arange(n_id.size(0), device=device)
-        
-        # Get updated memory of all nodes involved in the computation.
-        memory, last_update = model['memory'](n_id)
 
+        # Get updated memory of all nodes involved in the computation.
+        z, last_update = model['memory'](n_id)
         z = model['gnn'](
-            memory,
+            z,
             last_update,
             edge_index,
             data.t[e_id].to(device),
             data.msg[e_id].to(device),
         )
 
-        pos_out = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
-        neg_out_src = model['link_pred'](z[assoc[neg_src]], z[assoc[dst]], z[assoc[prod]])
-        neg_out_prod = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[neg_prod]])
-        neg_out_dst = model['link_pred'](z[assoc[src]], z[assoc[neg_dst]], z[assoc[prod]])
+        pos_out = model['link_pred'](z[assoc[src]], z[assoc[pos_dst]])
+        neg_out = model['link_pred'](z[assoc[src]], z[assoc[neg_dst]])
 
-        # TODO: add inventory constraint
         loss = criterion(pos_out, torch.ones_like(pos_out))
-        loss += criterion(neg_out_src, torch.zeros_like(neg_out_src))
-        loss += criterion(neg_out_prod, torch.zeros_like(neg_out_prod))
-        loss += criterion(neg_out_dst, torch.zeros_like(neg_out_dst))
+        loss += criterion(neg_out, torch.zeros_like(neg_out))
 
         # Update memory and neighbor loader with ground-truth state.
-        model['memory'].update_state(src, dst, prod, t, msg) # handle inventory
-        neighbor_loader.insert(src, dst, prod)
+        model['memory'].update_state(src, pos_dst, t, msg)
+        neighbor_loader.insert(src, pos_dst)
 
         loss.backward()
         optimizer.step()
@@ -134,7 +128,7 @@ def train():
 
     return total_loss / train_data.num_events
 
-# TODO: modify test()
+
 @torch.no_grad()
 def test(loader, neg_sampler, split_mode):
     r"""
@@ -161,6 +155,11 @@ def test(loader, neg_sampler, split_mode):
             pos_batch.t,
             pos_batch.msg,
         )
+
+        #print(pos_src[:5])
+        #print(pos_dst[:5])
+        #print(pos_t[:5])
+        #print(pos_msg[:5])
 
         neg_batch_list = neg_sampler.query_batch(pos_src, pos_dst, pos_t, split_mode=split_mode)
 
@@ -211,7 +210,7 @@ import sys
 
 def get_tgn_args():
     parser = argparse.ArgumentParser('*** TGB ***')
-    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-supplychains')
+    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
     parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
     parser.add_argument('--bs', type=int, help='Batch size', default=200)
     parser.add_argument('--k_value', type=int, help='k_value for computing ranking metrics', default=10)
@@ -255,42 +254,37 @@ args, defaults, _ = get_tgn_args()
 labeling_args = compare_args(args, defaults)
 MODEL_NAME = 'TGN'
 
-# start a new wandb run to track this script
-WANDB = args.wandb
-if WANDB:
-    wandb.init(
-        # set the wandb project where this run will be logged
-        project=WANDB_PROJECT,
-        entity=WANDB_TEAM,
-        resume="allow",
+FOLDER_NAME_HDR = f"model={MODEL_NAME}"
+for arg_name in sorted(list(labeling_args.keys())):
+    arg_value = labeling_args[arg_name]
+    FOLDER_NAME_HDR += f"_{arg_name}={arg_value}"
+    
+#print("INFO: Arguments:", args)
+#print(FOLDER_NAME_HDR)
+#raise ValueError("bruh")
 
-        # track hyperparameters and run metadata
-        config=args
-    )
-    config = wandb.config
-
-DATA = config.data if WANDB else args.data
-LR = config.lr if WANDB else args.lr
-BATCH_SIZE = config.bs if WANDB else args.bs
-K_VALUE = config.k_value if WANDB else args.k_value  
-NUM_EPOCH = config.num_epoch if WANDB else args.num_epoch
-SEED = config.seed if WANDB else args.seed
-MEM_DIM = config.mem_dim if WANDB else args.mem_dim
-TIME_DIM = config.time_dim if WANDB else args.time_dim
-EMB_DIM = config.emb_dim if WANDB else args.emb_dim
-TOLERANCE = config.tolerance if WANDB else args.tolerance
-PATIENCE = config.patience if WANDB else args.patience
-NUM_RUNS = config.num_run if WANDB else args.num_run
-assert (NUM_RUNS == 1)
-
+""" modify this to accept addtional args for dataset name """
+DATA = args.dataset
+LR = args.lr
+BATCH_SIZE = args.bs
+K_VALUE = args.k_value  
+NUM_EPOCH = args.num_epoch
+SEED = args.seed
+MEM_DIM = args.mem_dim
+TIME_DIM = args.time_dim
+EMB_DIM = args.emb_dim
+TOLERANCE = args.tolerance
+PATIENCE = args.patience
+NUM_RUNS = args.num_run
 NUM_NEIGHBORS = 10
-MODEL_NAME = 'TGN'
-if WANDB:
-    wandb.summary["num_neighbors"] = NUM_NEIGHBORS
-    wandb.summary["model_name"] = MODEL_NAME
+bipartite = args.bipartite 
 
-UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
-UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{UNIQUE_TIME}"
+#preprocessing for the bipartite graph 
+DATA_FOLDER_NAME = DATA.replace("-","_")
+metadata_path = f"./tgb/datasets/{DATA_FOLDER_NAME}/{DATA}_meta.json"
+with open(metadata_path,"r") as file:
+    metadata_supplychains = json.load(file) 
+    product_min_idx = metadata_supplychains["product_threshold"]
 
 # ==========
 
@@ -314,23 +308,19 @@ train_loader = TemporalDataLoader(train_data, batch_size=BATCH_SIZE)
 val_loader = TemporalDataLoader(val_data, batch_size=BATCH_SIZE)
 test_loader = TemporalDataLoader(test_data, batch_size=BATCH_SIZE)
 
-# Ensure to only sample actual source, product, or destination nodes as negatives.
-min_src_idx, max_src_idx = int(data.src.min()), int(data.src.max())
-min_prod_idx, max_prod_idx = int(data.prod.min()), int(data.prod.max())
+# Ensure to only sample actual destination nodes as negatives.
 min_dst_idx, max_dst_idx = int(data.dst.min()), int(data.dst.max())
 
-
 # neighhorhood sampler
-# TODO: @ Ben, check data.num_nodes accounts for both firm and product
-neighbor_loader = LastNeighborLoaderTGNPL(data.num_nodes, size=NUM_NEIGHBORS, device=device)
+neighbor_loader = LastNeighborLoader(data.num_nodes, size=NUM_NEIGHBORS, device=device)
 
 # define the model end-to-end
-memory = TGNPLMemory(
+memory = TGNMemory(
     data.num_nodes,
     data.msg.size(-1),
     MEM_DIM,
     TIME_DIM,
-    message_module=IdentityMessageTGNPL(data.msg.size(-1), MEM_DIM, TIME_DIM),
+    message_module=IdentityMessage(data.msg.size(-1), MEM_DIM, TIME_DIM),
     aggregator_module=LastAggregator(),
 ).to(device)
 
@@ -341,13 +331,12 @@ gnn = GraphAttentionEmbedding(
     time_enc=memory.time_enc,
 ).to(device)
 
-link_pred = LinkPredictorTGNPL(in_channels=EMB_DIM).to(device)
+link_pred = LinkPredictor(in_channels=EMB_DIM).to(device)
 
 model = {'memory': memory,
          'gnn': gnn,
          'link_pred': link_pred}
 
-# TODO: if inventory is trainable, add inventory.parameters() here too
 optimizer = torch.optim.Adam(
     set(model['memory'].parameters()) | set(model['gnn'].parameters()) | set(model['link_pred'].parameters()),
     lr=LR,
@@ -356,6 +345,7 @@ criterion = torch.nn.BCEWithLogitsLoss()
 
 # Helper vector to map global node indices to local ones.
 assoc = torch.empty(data.num_nodes, dtype=torch.long, device=device)
+
 
 print("==========================================================")
 print(f"=================*** {MODEL_NAME}: LinkPropPred: {DATA} ***=============")
@@ -370,9 +360,9 @@ if not osp.exists(results_path):
     os.mkdir(results_path)
     print('INFO: Create directory {}'.format(results_path))
 Path(results_path).mkdir(parents=True, exist_ok=True)
-results_filename = f'{results_path}/{UNIQUE_NAME}_results.json'
+results_filename = f'{results_path}/{MODEL_NAME}_{DATA}_results.json'
 
-for run_idx in range(NUM_RUNS):    
+for run_idx in range(NUM_RUNS):
     print('-------------------------------------------------------------------------------')
     print(f"INFO: >>>>> Run: {run_idx} <<<<<")
     start_run = timeit.default_timer()
@@ -382,9 +372,8 @@ for run_idx in range(NUM_RUNS):
     set_random_seed(run_idx + SEED)
 
     # define an early stopper
-    save_model_dir = f'{osp.dirname(osp.abspath(__file__))}/saved_models/'
-    save_model_id = f'{UNIQUE_NAME}_{run_idx}'
-
+    save_model_dir = f'{osp.dirname(osp.abspath(__file__))}/{FOLDER_NAME_HDR}_saved_models/'
+    save_model_id = f'{MODEL_NAME}_{DATA}_{SEED}_{run_idx}'
     early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
                                     tolerance=TOLERANCE, patience=PATIENCE)
 
@@ -398,26 +387,16 @@ for run_idx in range(NUM_RUNS):
         # training
         start_epoch_train = timeit.default_timer()
         loss = train()
-        TIME_TRAIN = timeit.default_timer() - start_epoch_train
         print(
-            f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Training elapsed Time (s): {TIME_TRAIN: .4f}"
+            f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Training elapsed Time (s): {timeit.default_timer() - start_epoch_train: .4f}"
         )
 
         # validation
         start_val = timeit.default_timer()
         perf_metric_val = test(val_loader, neg_sampler, split_mode="val")
-        TIME_VAL = timeit.default_timer() - start_val
         print(f"\tValidation {metric}: {perf_metric_val: .4f}")
-        print(f"\tValidation: Elapsed time (s): {TIME_VAL: .4f}")
+        print(f"\tValidation: Elapsed time (s): {timeit.default_timer() - start_val: .4f}")
         val_perf_list.append(perf_metric_val)
-
-        # log metric to wandb
-        if WANDB:
-            wandb.log({"loss": loss, 
-                       "perf_metric_val": perf_metric_val, 
-                       "elapsed_time_train": TIME_TRAIN, 
-                       "elapsed_time_val": TIME_VAL
-                       })
 
         # check for early stopping
         if early_stopper.step_check(perf_metric_val, model):
@@ -441,12 +420,6 @@ for run_idx in range(NUM_RUNS):
     print(f"\tTest: {metric}: {perf_metric_test: .4f}")
     test_time = timeit.default_timer() - start_test
     print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
-    if WANDB:
-        wandb.summary["metric"] = metric
-        wandb.summary["best_epoch"] = early_stopper.best_epoch
-        wandb.summary["perf_metric_test"] = perf_metric_test
-        wandb.summary["elapsed_time_test"] = test_time
-
 
     save_results({'model': MODEL_NAME,
                   'data': DATA,
@@ -464,4 +437,3 @@ for run_idx in range(NUM_RUNS):
 
 print(f"Overall Elapsed Time (s): {timeit.default_timer() - start_overall: .4f}")
 print("==============================================================")
-wandb.finish()
