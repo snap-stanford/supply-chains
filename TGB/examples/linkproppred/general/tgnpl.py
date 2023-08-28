@@ -36,10 +36,11 @@ from modules.memory_module import TGNPLMemory
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset
 
-
 # ==========
 # ========== Define helper function...
 # ==========
+
+import json
 
 def train():
     r"""
@@ -204,17 +205,54 @@ def test(loader, neg_sampler, split_mode):
 
     return perf_metrics
 
-# ==========
-# ==========
-# ==========
+import argparse 
+import sys
 
+def get_tgn_args():
+    parser = argparse.ArgumentParser('*** TGB ***')
+    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-supplychains')
+    parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
+    parser.add_argument('--bs', type=int, help='Batch size', default=200)
+    parser.add_argument('--k_value', type=int, help='k_value for computing ranking metrics', default=10)
+    parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=50)
+    parser.add_argument('--seed', type=int, help='Random seed', default=1)
+    parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=100)
+    parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
+    parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=100)
+    parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
+    parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
+    parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
+    parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
+    parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
+
+    try:
+        args = parser.parse_args()
+        defaults = parser.parse_args([])
+    
+    except:
+        parser.print_help()
+        sys.exit(0)
+    return args, defaults, sys.argv
+
+def compare_args(args, defaults): 
+    #compares deviations of the parsed arguments from the defaults (for labeling the checkpoints
+    #& results folder succinctly) 
+    args_dict = vars(args)
+    defaults_dict = vars(defaults)
+    return {key: value for key,value in args_dict.items() if (
+        key not in defaults_dict or defaults_dict[key] != args_dict[key])}
+    
+# ==========
+# ==========
+# ==========
 
 # Start...
 start_overall = timeit.default_timer()
 
 # ========== set parameters...
-args, _ = get_args()
-print("INFO: Arguments:", args)
+args, defaults, _ = get_tgn_args()
+labeling_args = compare_args(args, defaults)
+MODEL_NAME = 'TGN'
 
 # start a new wandb run to track this script
 WANDB = args.wandb
@@ -252,6 +290,7 @@ if WANDB:
 
 UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
 UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{UNIQUE_TIME}"
+
 # ==========
 
 # set the device
@@ -325,7 +364,7 @@ evaluator = Evaluator(name=DATA)
 neg_sampler = dataset.negative_sampler
 
 # for saving the results...
-results_path = f'{osp.dirname(osp.abspath(__file__))}/saved_results'
+results_path = f'{osp.dirname(osp.abspath(__file__))}/{FOLDER_NAME_HDR}_saved_results'
 if not osp.exists(results_path):
     os.mkdir(results_path)
     print('INFO: Create directory {}'.format(results_path))
