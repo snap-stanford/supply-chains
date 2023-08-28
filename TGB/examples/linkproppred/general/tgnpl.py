@@ -31,7 +31,7 @@ from modules.decoder import LinkPredictorTGNPL
 from modules.emb_module import GraphAttentionEmbedding
 from modules.msg_func import IdentityMessageTGNPL
 from modules.msg_agg import LastAggregator
-from modules.neighbor_loader import LastNeighborLoader
+from modules.neighbor_loader import LastNeighborLoaderTGNPL
 from modules.memory_module import TGNPLMemory
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset
@@ -69,8 +69,8 @@ def train():
 
         # Sample negative source, product, destination nodes.
         neg_src = torch.randint(
-            min_prod_idx,
-            min_prod_idx + 1,
+            min_src_idx,
+            max_src_idx + 1,
             (src.size(0),),
             dtype=torch.long,
             device=device,
@@ -78,7 +78,7 @@ def train():
          
         neg_prod = torch.randint(
             min_prod_idx,
-            min_prod_idx + 1,
+            max_prod_idx + 1,
             (src.size(0),),
             dtype=torch.long,
             device=device,
@@ -98,8 +98,6 @@ def train():
         # 'edge_index' are relevant firm-product and product-firm edges
         n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
         assoc[n_id] = torch.arange(n_id.size(0), device=device)
-
-        # TODO: Compute current embedding for memory update
         
         # Get updated memory of all nodes involved in the computation.
         memory, last_update = model['memory'](n_id)
@@ -112,10 +110,10 @@ def train():
             data.msg[e_id].to(device),
         )
 
-        pos_out = model['link_pred'](z[assoc[src]], z[assoc[prod]], z[assoc[dst]])
-        neg_out_src = model['link_pred'](z[assoc[neg_src]], z[assoc[prod]], z[assoc[dst]])
-        neg_out_prod = model['link_pred'](z[assoc[src]], z[assoc[neg_prod]], z[assoc[dst]])
-        neg_out_dst = model['link_pred'](z[assoc[src]], z[assoc[prod]], z[assoc[neg_dst]])
+        pos_out = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
+        neg_out_src = model['link_pred'](z[assoc[neg_src]], z[assoc[dst]], z[assoc[prod]])
+        neg_out_prod = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[neg_prod]])
+        neg_out_dst = model['link_pred'](z[assoc[src]], z[assoc[neg_dst]], z[assoc[prod]])
 
         # TODO: add inventory constraint
         loss = criterion(pos_out, torch.ones_like(pos_out))
@@ -124,8 +122,8 @@ def train():
         loss += criterion(neg_out_dst, torch.zeros_like(neg_out_dst))
 
         # Update memory and neighbor loader with ground-truth state.
-        model['memory'].update_state(src, prod, dst, t, msg) # handle inventory
-        neighbor_loader.insert(src, prod, dst)
+        model['memory'].update_state(src, dst, prod, t, msg) # handle inventory
+        neighbor_loader.insert(src, dst, prod)
 
         loss.backward()
         optimizer.step()
@@ -283,7 +281,8 @@ min_dst_idx, max_dst_idx = int(data.dst.min()), int(data.dst.max())
 
 
 # neighhorhood sampler
-neighbor_loader = LastNeighborLoader(data.num_nodes, size=NUM_NEIGHBORS, device=device)
+# TODO: @ Ben, check data.num_nodes accounts for both firm and product
+neighbor_loader = LastNeighborLoaderTGNPL(data.num_nodes, size=NUM_NEIGHBORS, device=device)
 
 # define the model end-to-end
 memory = TGNPLMemory(
