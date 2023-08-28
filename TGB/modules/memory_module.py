@@ -85,9 +85,9 @@ class TGNPLMemory(torch.nn.Module):
         if self.use_inventory:
             self.memory_dim = self.state_dim + self.num_prods
             if self.learn_att_direct:
-                self.att_weights = Parameter(torch.empty(self.num_prods, self.num_prods))
+                self.att_weights = Parameter(torch.ones(size=(self.num_prods, self.num_prods), requires_grad=True))
             else:
-                self.prod_project = Linear(self.state_dim, self.state_dim*2)  # project product emb as output/input
+                self.prod_bilinear = Parameter(torch.ones(size=(self.state_dim, self.state_dim), requires_grad=True))
         else:
             self.memory_dim = self.state_dim
         self.register_buffer("memory", torch.empty(self.num_nodes, self.memory_dim))
@@ -115,9 +115,6 @@ class TGNPLMemory(torch.nn.Module):
             self.aggr_module.reset_parameters()
         self.time_enc.reset_parameters()
         self.state_updater.reset_parameters()
-        if self.use_inventory:
-            if not self.learn_att_direct:
-                self.prod_project.reset_parameters()
         self.reset_state()
 
     def reset_state(self):
@@ -176,10 +173,8 @@ class TGNPLMemory(torch.nn.Module):
                 prod_emb = self.memory[self.num_firms:, :self.state_dim]
             else:  # received product embeddings
                 assert prod_emb.size == (self.num_prods, self.state_dim)
-            projected = self.prod_project(prod_emb)
-            output_emb = projected[:, :self.state_dim]  # num_products x state_dim
-            input_emb = projected[:, self.state_dim:]  # num_products x state_dim
-            att_weights = output_emb @ input_emb.T  # num_products x num_products
+            att_weights = prod_emb @ (self.prod_bilinear @ prod_emb.T)  # has gradient issues
+            # att_weights = prod_emb @ prod_emb.T  # this works
         return torch.nn.ReLU(inplace=False)(att_weights)
         
     def _update_memory(self, n_id: Tensor):
