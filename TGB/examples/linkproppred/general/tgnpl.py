@@ -29,12 +29,12 @@ from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
 from modules.decoder import LinkPredictorTGNPL
 from modules.emb_module import GraphAttentionEmbedding
-from modules.msg_func import IdentityMessageTGNPL
-from modules.msg_agg import LastAggregator
+from modules.msg_func import TGNPLMessage
+from modules.msg_agg import MeanAggregator
 from modules.neighbor_loader import LastNeighborLoaderTGNPL
 from modules.memory_module import TGNPLMemory
 from modules.early_stopping import  EarlyStopMonitor
-from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset
+from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPredDatasetHyper
 
 # ==========
 # ========== Define helper function...
@@ -63,6 +63,9 @@ def train():
 
     total_loss = 0
     for batch in train_loader:
+
+        torch.autograd.set_detect_anomaly(True)
+        
         batch = batch.to(device)
         optimizer.zero_grad()
 
@@ -102,7 +105,10 @@ def train():
         assoc[n_id] = torch.arange(n_id.size(0), device=device)
         
         # Get updated memory of all nodes involved in the computation.
-        memory, last_update = model['memory'](n_id)
+        print(n_id.shape)
+        
+        memory, last_update, inv_loss = model['memory'](n_id)
+        print("x = ", memory.shape, last_update.shape, inv_loss.shape)
 
         z = model['gnn'](
             memory,
@@ -155,14 +161,16 @@ def test(loader, neg_sampler, split_mode):
     perf_list = []
 
     for pos_batch in loader:
-        pos_src, pos_dst, pos_t, pos_msg = (
+        pos_src, pos_prod, pos_dst, pos_t, pos_msg = (
             pos_batch.src,
+            pos_batch.prod,
             pos_batch.dst,
             pos_batch.t,
             pos_batch.msg,
         )
 
-        neg_batch_list = neg_sampler.query_batch(pos_src, pos_dst, pos_t, split_mode=split_mode)
+        #change to entry to product
+        neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
 
         for idx, neg_batch in enumerate(neg_batch_list):
             src = torch.full((1 + len(neg_batch),), pos_src[idx], device=device)
@@ -255,6 +263,8 @@ args, defaults, _ = get_tgn_args()
 labeling_args = compare_args(args, defaults)
 MODEL_NAME = 'TGN'
 
+#print(args.wandb)
+
 # start a new wandb run to track this script
 WANDB = args.wandb
 if WANDB:
@@ -269,7 +279,7 @@ if WANDB:
     )
     config = wandb.config
 
-DATA = config.data if WANDB else args.data
+DATA = config.dataset if WANDB else args.dataset
 LR = config.lr if WANDB else args.lr
 BATCH_SIZE = config.bs if WANDB else args.bs
 K_VALUE = config.k_value if WANDB else args.k_value  
@@ -294,11 +304,17 @@ UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEE
 
 # ==========
 
+#open the meta file (change to flexible path later)
+import json
+with open("/lfs/turing1/0/bbyan/repos/SupplyChains/TGB/tgb/datasets/tgbl_hypergraph/tgbl-hypergraph_meta.json","r") as file:
+    METADATA = json.load(file)
+    NUM_NODES = len(METADATA["id2entity"])
+
 # set the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # data loading
-dataset = PyGLinkPropPredDataset(name=DATA, root="datasets")
+dataset = PyGLinkPropPredDatasetHyper(name=DATA, root="datasets")
 train_mask = dataset.train_mask
 val_mask = dataset.val_mask
 test_mask = dataset.test_mask
@@ -319,23 +335,29 @@ min_src_idx, max_src_idx = int(data.src.min()), int(data.src.max())
 min_prod_idx, max_prod_idx = int(data.prod.min()), int(data.prod.max())
 min_dst_idx, max_dst_idx = int(data.dst.min()), int(data.dst.max())
 
+#raise ValueError("bruh")
 
 # neighhorhood sampler
 # TODO: @ Ben, check data.num_nodes accounts for both firm and product
-neighbor_loader = LastNeighborLoaderTGNPL(data.num_nodes, size=NUM_NEIGHBORS, device=device)
+neighbor_loader = LastNeighborLoaderTGNPL(NUM_NODES, size=NUM_NEIGHBORS, device=device)
+
+print("num_nodes", data.msg.size(-1), NUM_NODES, METADATA["product_threshold"], data.num_nodes)
+print(args)
+NUM_PRODUCTS = NUM_NODES - METADATA["product_threshold"]
 
 # define the model end-to-end
 memory = TGNPLMemory(
-    data.num_nodes,
-    data.msg.size(-1),
-    MEM_DIM,
-    TIME_DIM,
-    message_module=IdentityMessageTGNPL(data.msg.size(-1), MEM_DIM, TIME_DIM),
-    aggregator_module=LastAggregator(),
+    num_nodes = NUM_NODES,
+    num_prods = NUM_PRODUCTS,
+    raw_msg_dim = data.msg.size(-1),
+    state_dim = MEM_DIM,
+    time_dim = TIME_DIM,
+    message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM + NUM_PRODUCTS, TIME_DIM),
+    aggregator_module=MeanAggregator(),
 ).to(device)
 
 gnn = GraphAttentionEmbedding(
-    in_channels=MEM_DIM,
+    in_channels=MEM_DIM + NUM_PRODUCTS,
     out_channels=EMB_DIM,
     msg_dim=data.msg.size(-1),
     time_enc=memory.time_enc,
@@ -355,7 +377,7 @@ optimizer = torch.optim.Adam(
 criterion = torch.nn.BCEWithLogitsLoss()
 
 # Helper vector to map global node indices to local ones.
-assoc = torch.empty(data.num_nodes, dtype=torch.long, device=device)
+assoc = torch.empty(NUM_NODES, dtype=torch.long, device=device)
 
 print("==========================================================")
 print(f"=================*** {MODEL_NAME}: LinkPropPred: {DATA} ***=============")
@@ -365,7 +387,7 @@ evaluator = Evaluator(name=DATA)
 neg_sampler = dataset.negative_sampler
 
 # for saving the results...
-results_path = f'{osp.dirname(osp.abspath(__file__))}/{FOLDER_NAME_HDR}_saved_results'
+results_path = f'{osp.dirname(osp.abspath(__file__))}/saved_results'
 if not osp.exists(results_path):
     os.mkdir(results_path)
     print('INFO: Create directory {}'.format(results_path))

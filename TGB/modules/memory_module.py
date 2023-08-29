@@ -74,6 +74,7 @@ class TGNPLMemory(torch.nn.Module):
         self.debug = debug
         
         if state_updater_cell == "gru":  # for TGN
+            print(message_module.out_channels, state_dim)
             self.state_updater = GRUCell(message_module.out_channels, state_dim)
         elif state_updater_cell == "rnn":  # for JODIE & DyRep
             self.state_updater = RNNCell(message_module.out_channels, state_dim)
@@ -223,6 +224,7 @@ class TGNPLMemory(torch.nn.Module):
             print('aggr', aggr)
         
         # Get local copy of updated state
+        print("memory-module", aggr.shape, state.shape)
         state = self.state_updater(aggr, state)
             
         # Get local copy of updated `last_update`.
@@ -241,7 +243,8 @@ class TGNPLMemory(torch.nn.Module):
             inventory = inventory - total_consumed + total_bought
         else:
             inv_loss = 0
-            
+
+        print("state = ",state.shape, "inventory = ", inventory.shape)
         memory = torch.cat([state, inventory], dim=1)
         if self.debug:
             print('memory', memory)
