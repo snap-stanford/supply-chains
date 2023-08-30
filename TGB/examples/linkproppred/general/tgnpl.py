@@ -9,6 +9,7 @@ command for an example run:
 import wandb
 import math
 import timeit
+from tqdm import tqdm
 
 import os
 import os.path as osp
@@ -73,8 +74,8 @@ def train():
     model['memory'].reset_state()  # Start with a fresh memory.
     neighbor_loader.reset_state()  # Start with an empty graph.
 
-    total_loss = 0
-    for batch in train_loader:
+    total_loss, total_logits_loss, total_inv_loss = 0, 0, 0
+    for batch in tqdm(train_loader):
 
         torch.autograd.set_detect_anomaly(True)
         
@@ -82,7 +83,7 @@ def train():
         optimizer.zero_grad()
 
         src, prod, dst, t, msg = batch.src, batch.prod, batch.dst, batch.t, batch.msg # Note: msg is amount
-
+        
         # Sample negative source, product, destination nodes.
         neg_src = torch.randint(
             min_src_idx,
@@ -131,11 +132,11 @@ def train():
         neg_out_prod = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[neg_prod]])
         neg_out_dst = model['link_pred'](z[assoc[src]], z[assoc[neg_dst]], z[assoc[prod]])
 
-        loss = criterion(pos_out, torch.ones_like(pos_out))
-        loss += criterion(neg_out_src, torch.zeros_like(neg_out_src))
-        loss += criterion(neg_out_prod, torch.zeros_like(neg_out_prod))
-        loss += criterion(neg_out_dst, torch.zeros_like(neg_out_dst))
-        loss += inv_loss
+        logits_loss = criterion(pos_out, torch.ones_like(pos_out))
+        logits_loss += criterion(neg_out_src, torch.zeros_like(neg_out_src))
+        logits_loss += criterion(neg_out_prod, torch.zeros_like(neg_out_prod))
+        logits_loss += criterion(neg_out_dst, torch.zeros_like(neg_out_dst))
+        loss = logits_loss + inv_loss
 
         # Update memory and neighbor loader with ground-truth state.
         model['memory'].update_state(src, dst, prod, t, msg) # handle inventory
@@ -145,8 +146,10 @@ def train():
         optimizer.step()
         model['memory'].detach()
         total_loss += float(loss) * batch.num_events
+        total_logits_loss += float(logits_loss) * batch.num_events
+        total_inv_loss += float(inv_loss) * batch.num_events
 
-    return total_loss / train_data.num_events
+    return total_loss / train_data.num_events, total_logits_loss / train_data.num_events, total_inv_loss / train_data.num_events
 
 @torch.no_grad()
 def test(loader, neg_sampler, split_mode):
@@ -167,7 +170,7 @@ def test(loader, neg_sampler, split_mode):
 
     perf_list = []
 
-    for pos_batch in loader:
+    for pos_batch in tqdm(loader):
         pos_src, pos_prod, pos_dst, pos_t, pos_msg = (
             pos_batch.src,
             pos_batch.prod,
@@ -187,7 +190,6 @@ def test(loader, neg_sampler, split_mode):
             f_id = torch.cat([src, dst]).unique()
             p_id = torch.cat([prod]).unique()
 
-            n_id = torch.cat([src, dst]).unique()
             n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
             assoc[n_id] = torch.arange(n_id.size(0), device=device)
 
@@ -224,7 +226,7 @@ import sys
 
 def get_tgn_args():
     parser = argparse.ArgumentParser('*** TGB ***')
-    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-supplychains')
+    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
     parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
     parser.add_argument('--bs', type=int, help='Batch size', default=200)
     parser.add_argument('--k_value', type=int, help='k_value for computing ranking metrics', default=10)
@@ -266,7 +268,7 @@ start_overall = timeit.default_timer()
 # ========== set parameters...
 args, defaults, _ = get_tgn_args()
 labeling_args = compare_args(args, defaults)
-MODEL_NAME = 'TGN'
+MODEL_NAME = 'TGNPL'
 
 #print(args.wandb)
 
@@ -299,7 +301,7 @@ NUM_RUNS = config.num_run if WANDB else args.num_run
 assert (NUM_RUNS == 1)
 
 NUM_NEIGHBORS = 10
-MODEL_NAME = 'TGN'
+MODEL_NAME = 'TGNPL'
 if WANDB:
     wandb.summary["num_neighbors"] = NUM_NEIGHBORS
     wandb.summary["model_name"] = MODEL_NAME
@@ -311,10 +313,11 @@ UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEE
 
 #open the meta file (change to flexible path later)
 import json
-with open("./tgb/datasets/tgbl_hypergraph/tgbl-hypergraph_meta.json","r") as file:
+with open(f"/lfs/turing1/0/zhiyinl/supply-chains/TGB/tgb/datasets/{DATA.replace('-', '_')}/{DATA}_meta.json","r") as file:
     METADATA = json.load(file)
     NUM_NODES = len(METADATA["id2entity"])
 
+print("Starting")
 # set the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -342,7 +345,8 @@ min_dst_idx, max_dst_idx = int(data.dst.min()), int(data.dst.max())
 
 # neighhorhood sampler
 neighbor_loader = LastNeighborLoaderTGNPL(NUM_NODES, size=NUM_NEIGHBORS, device=device)
-NUM_PRODUCTS = NUM_NODES - METADATA["product_threshold"]
+NUM_FIRMS = METADATA["product_threshold"]
+NUM_PRODUCTS = NUM_NODES - NUM_FIRMS
 
 # define the model end-to-end
 memory = TGNPLMemory(
@@ -368,7 +372,6 @@ model = {'memory': memory,
          'gnn': gnn,
          'link_pred': link_pred}
 
-# TODO: if inventory is trainable, add inventory.parameters() here too
 optimizer = torch.optim.Adam(
     set(model['memory'].parameters()) | set(model['gnn'].parameters()) | set(model['link_pred'].parameters()),
     lr=LR,
@@ -418,10 +421,10 @@ for run_idx in range(NUM_RUNS):
     for epoch in range(1, NUM_EPOCH + 1):
         # training
         start_epoch_train = timeit.default_timer()
-        loss = train()
+        loss, logits_loss, inv_loss = train()
         TIME_TRAIN = timeit.default_timer() - start_epoch_train
         print(
-            f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Training elapsed Time (s): {TIME_TRAIN: .4f}"
+            f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Training elapsed Time (s): {TIME_TRAIN: .4f}"
         )
 
         # validation
@@ -435,6 +438,8 @@ for run_idx in range(NUM_RUNS):
         # log metric to wandb
         if WANDB:
             wandb.log({"loss": loss, 
+                       "logits_loss": logits_loss,
+                       "inv_loss": inv_loss,
                        "perf_metric_val": perf_metric_val, 
                        "elapsed_time_train": TIME_TRAIN, 
                        "elapsed_time_val": TIME_VAL
