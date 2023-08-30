@@ -92,8 +92,9 @@ class LastNeighborLoaderTGNPL(LastNeighborLoader):
         return super().__call__(n_id)
 
     def insert(self, src: Tensor, dst: Tensor, prod: Tensor):
-        super().insert(src, prod)
-        super().insert(dst, prod)
+        for i in range(src.size()[0]):  
+            super().insert(src[i:i+1], prod[i:i+1])
+            super().insert(dst[i:i+1], prod[i:i+1])
         
     def reset_state(self):
         return super().reset_state()

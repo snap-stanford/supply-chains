@@ -42,6 +42,18 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPred
 
 import json
 
+def repeat_tensor(t, k):
+    """
+    When k = 2, tensor([1, 2, 3]) becomes tensor([1, 1, 2, 2, 3, 3]).
+    Used to align the ordering of neighbor loader 'e_id' and data
+    """
+    if len(t.shape)==1:
+        return t.reshape(-1, 1).repeat(1, k).reshape(t.shape[0]*k)
+    elif len(t.shape)==2:
+        return t.reshape(-1, 1).repeat(1, k).reshape(t.shape[0]*k, 1)
+    else:
+        raise Exception("repeat_tensor: Not Applicable")
+
 def train():
     r"""
     Training procedure for TGN model
@@ -110,8 +122,8 @@ def train():
             memory,
             last_update,
             edge_index,
-            data.t.repeat(2)[e_id].to(device), #compile-time safe, check functionality
-            data.msg.repeat(2,1)[e_id].to(device), #compile-time safe, check functionality
+            repeat_tensor(data.t, 2)[e_id].to(device),
+            repeat_tensor(data.msg, 2)[e_id].to(device),
         )
 
         pos_out = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
@@ -185,8 +197,8 @@ def test(loader, neg_sampler, split_mode):
                 memory,
                 last_update,
                 edge_index,
-                data.t.repeat(2)[e_id].to(device),
-                data.msg.repeat(2,1)[e_id].to(device),
+                repeat_tensor(data.t, 2)[e_id].to(device),
+                repeat_tensor(data.msg, 2)[e_id].to(device),
             )
 
             y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
