@@ -216,7 +216,8 @@ def test(loader, neg_sampler, split_mode):
         # Update memory and neighbor loader with ground-truth state.
         model['memory'].update_state(pos_src, pos_dst, pos_prod, pos_t, pos_msg)
         neighbor_loader.insert(pos_src, pos_dst, pos_prod)
-
+    print("\n\n input dict:", input_dict)
+    print("\n\nPerformance", perf_list)
     perf_metrics = float(torch.tensor(perf_list).mean())
 
     return perf_metrics
@@ -240,7 +241,9 @@ def get_tgn_args():
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
     parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
     parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
-
+    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating memory inventory loss', default=1e-15)
+    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating memory inventory loss', default=1e-16)
+    
     try:
         args = parser.parse_args()
         defaults = parser.parse_args([])
@@ -298,6 +301,8 @@ EMB_DIM = config.emb_dim if WANDB else args.emb_dim
 TOLERANCE = config.tolerance if WANDB else args.tolerance
 PATIENCE = config.patience if WANDB else args.patience
 NUM_RUNS = config.num_run if WANDB else args.num_run
+DEBT_PENALTY = config.debt_penalty if WANDB else args.debt_penalty
+CONSUM_RWD = config.consum_rwd if WANDB else args.consum_rwd
 assert (NUM_RUNS == 1)
 
 NUM_NEIGHBORS = 10
@@ -307,7 +312,7 @@ if WANDB:
     wandb.summary["model_name"] = MODEL_NAME
 
 UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
-UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{UNIQUE_TIME}"
+UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{DEBT_PENALTY}_{CONSUM_RWD}_{UNIQUE_TIME}"
 
 # ==========
 
@@ -357,6 +362,8 @@ memory = TGNPLMemory(
     time_dim = TIME_DIM,
     message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM + NUM_PRODUCTS, TIME_DIM),
     aggregator_module=MeanAggregator(),
+    debt_penalty=DEBT_PENALTY,
+    consumption_reward=CONSUM_RWD,
 ).to(device)
 
 gnn = GraphAttentionEmbedding(

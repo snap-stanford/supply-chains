@@ -63,8 +63,8 @@ class TGNPLMemory(torch.nn.Module):
         self.time_dim = time_dim
         
         self.msg_s_module = message_module  # msg module for supplier (src)
-        self.msg_d_module = message_module  # msg module for buyer (dst)
-        self.msg_p_module = message_module  # msg module for product (prod)
+        self.msg_d_module = copy.deepcopy(message_module)  # msg module for buyer (dst)
+        self.msg_p_module = copy.deepcopy(message_module)  # msg module for product (prod)
         self.aggr_module = aggregator_module
         self.time_enc = TimeEncoder(time_dim)
         self.use_inventory = use_inventory
@@ -497,17 +497,17 @@ class TGNMemory(torch.nn.Module):
 
     def _get_updated_memory(self, n_id: Tensor) -> Tuple[Tensor, Tensor]:
         self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
-
+        
         # Compute messages (src -> dst).
         msg_s, t_s, src_s, dst_s = self._compute_msg(
             n_id, self.msg_s_store, self.msg_s_module
         )
-
+        
         # Compute messages (dst -> src).
         msg_d, t_d, src_d, dst_d = self._compute_msg(
             n_id, self.msg_d_store, self.msg_d_module
         )
-
+        
         # Aggregate messages.
         idx = torch.cat([src_s, src_d], dim=0)
         msg = torch.cat([msg_s, msg_d], dim=0)
