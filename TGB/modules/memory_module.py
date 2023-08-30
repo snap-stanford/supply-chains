@@ -171,7 +171,8 @@ class TGNPLMemory(torch.nn.Module):
             att_weights = self.att_weights
         else:
             if prod_emb is None:  # get product representations from memory
-                prod_emb = self.memory[self.num_firms:, :self.state_dim]
+                prod_emb = self.memory.clone()
+                prod_emb = prod_emb[self.num_firms:, :self.state_dim]
             else:  # received product embeddings
                 assert prod_emb.size == (self.num_prods, self.state_dim)
             att_weights = prod_emb @ (self.prod_bilinear @ prod_emb.T)  # has gradient issues
