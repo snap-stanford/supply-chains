@@ -31,6 +31,8 @@ def get_args():
 
 def process_csv(csv_file, metric, logscale):
     df = pd.read_csv(csv_file)
+    df = df[df["time_stamp"] < 20] #for debugging
+    
     df = df[(df["supplier_t"] != "") & (df["buyer_t"] != "") & (~df[metric].isna()) & (~df["supplier_t"].isna()) & (~df["buyer_t"].isna())]
     all_companies = list(set(df["supplier_t"]).union(set(df["buyer_t"])))
     all_products = list(set(df["hs6"]))

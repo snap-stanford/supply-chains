@@ -105,17 +105,19 @@ def train():
         assoc[n_id] = torch.arange(n_id.size(0), device=device)
         
         # Get updated memory of all nodes involved in the computation.
-        print(n_id.shape)
+        #print(n_id.shape)
         
         memory, last_update, inv_loss = model['memory'](n_id)
-        print("x = ", memory.shape, last_update.shape, inv_loss.shape)
+        #print("x = ", memory.shape, last_update.shape, inv_loss.shape)
+
+        print(data.t.shape, data.msg.shape, e_id)
 
         z = model['gnn'](
             memory,
             last_update,
             edge_index,
-            data.t[e_id].to(device),
-            data.msg[e_id].to(device),
+            data.t.repeat(2)[e_id].to(device), #compile-time safe, check functionality
+            data.msg.repeat(2,1)[e_id].to(device), #compile-time safe, check functionality
         )
 
         pos_out = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
@@ -185,6 +187,8 @@ def test(loader, neg_sampler, split_mode):
             n_id = torch.cat([src, dst]).unique()
             n_id, edge_index, e_id = neighbor_loader(n_id)
             assoc[n_id] = torch.arange(n_id.size(0), device=device)
+
+            print("bruh")
 
             # Get updated memory of all nodes involved in the computation.
             z, last_update = model['memory'](n_id)
@@ -311,7 +315,7 @@ with open("/lfs/turing1/0/bbyan/repos/SupplyChains/TGB/tgb/datasets/tgbl_hypergr
     NUM_NODES = len(METADATA["id2entity"])
 
 # set the device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cpu" # torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # data loading
 dataset = PyGLinkPropPredDatasetHyper(name=DATA, root="datasets")
