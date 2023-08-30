@@ -32,7 +32,7 @@ class GraphAttentionEmbedding(torch.nn.Module):
         rel_t = last_update[edge_index[0]] - t
         rel_t_enc = self.time_enc(rel_t.to(x.dtype))
         edge_attr = torch.cat([rel_t_enc, msg], dim=-1)
-        print("Conv1 shapes", x.shape, edge_index.shape, edge_attr.shape)
+        #print("Conv1 shapes", x.shape, edge_index.shape, edge_attr.shape)
         x = self.conv1(x, edge_index, edge_attr)
         x = self.relu(x)
         return self.conv2(x, edge_index, edge_attr)

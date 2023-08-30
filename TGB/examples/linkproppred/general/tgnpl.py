@@ -98,20 +98,14 @@ def train():
         
         f_id = torch.cat([src, dst, neg_src, neg_dst]).unique()
         p_id = torch.cat([prod, neg_prod]).unique()
-        # 'n_id' indexes both firm and product nodes (positive and negative)
-        # 'edge_index' are relevant firm-product and product-firm edges
+        # 'n_id' indexes both firm and product nodes (positive and negative),'edge_index' are relevant firm-product and product-firm edges
         n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
 
         assoc[n_id] = torch.arange(n_id.size(0), device=device)
         
         # Get updated memory of all nodes involved in the computation.
-        #print(n_id.shape)
-        
         memory, last_update, inv_loss = model['memory'](n_id)
-        #print("x = ", memory.shape, last_update.shape, inv_loss.shape)
-
-        print(data.t.shape, data.msg.shape, e_id)
-
+        
         z = model['gnn'](
             memory,
             last_update,
@@ -125,11 +119,11 @@ def train():
         neg_out_prod = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[neg_prod]])
         neg_out_dst = model['link_pred'](z[assoc[src]], z[assoc[neg_dst]], z[assoc[prod]])
 
-        # TODO: add inventory constraint
         loss = criterion(pos_out, torch.ones_like(pos_out))
         loss += criterion(neg_out_src, torch.zeros_like(neg_out_src))
         loss += criterion(neg_out_prod, torch.zeros_like(neg_out_prod))
         loss += criterion(neg_out_dst, torch.zeros_like(neg_out_dst))
+        loss += inv_loss
 
         # Update memory and neighbor loader with ground-truth state.
         model['memory'].update_state(src, dst, prod, t, msg) # handle inventory
@@ -142,7 +136,6 @@ def train():
 
     return total_loss / train_data.num_events
 
-# TODO: modify test()
 @torch.no_grad()
 def test(loader, neg_sampler, split_mode):
     r"""
@@ -171,36 +164,32 @@ def test(loader, neg_sampler, split_mode):
             pos_batch.msg,
         )
 
-        #change to entry to product
         neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
 
         for idx, neg_batch in enumerate(neg_batch_list):
-            src = torch.full((1 + len(neg_batch),), pos_src[idx], device=device)
-            dst = torch.tensor(
-                np.concatenate(
-                    ([np.array([pos_dst.cpu().numpy()[idx]]), np.array(neg_batch)]),
-                    axis=0,
-                ),
-                device=device,
-            )
+            ns_samples = len(neg_batch) // 3 
+            src = torch.tensor([pos_src[idx]] + neg_batch[:ns_samples] + [pos_src[idx] for _ in range(ns_samples * 2)], device=device)
+            prod = torch.tensor([pos_prod[idx]] + [pos_prod[idx] for _ in range(ns_samples)] + neg_batch[ns_samples:ns_samples * 2] + [pos_prod[idx] for _ in range(ns_samples)], device=device)
+            dst = torch.tensor([pos_dst[idx]] + [pos_dst[idx] for _ in range(ns_samples * 2)] + neg_batch[ns_samples * 2:], device=device)
+
+            f_id = torch.cat([src, dst]).unique()
+            p_id = torch.cat([prod]).unique()
 
             n_id = torch.cat([src, dst]).unique()
-            n_id, edge_index, e_id = neighbor_loader(n_id)
+            n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
             assoc[n_id] = torch.arange(n_id.size(0), device=device)
 
-            print("bruh")
-
             # Get updated memory of all nodes involved in the computation.
-            z, last_update = model['memory'](n_id)
+            memory, last_update, inv_loss = model['memory'](n_id)
             z = model['gnn'](
-                z,
+                memory,
                 last_update,
                 edge_index,
-                data.t[e_id].to(device),
-                data.msg[e_id].to(device),
+                data.t.repeat(2)[e_id].to(device),
+                data.msg.repeat(2,1)[e_id].to(device),
             )
 
-            y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]])
+            y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
 
             # compute MRR
             input_dict = {
@@ -211,8 +200,8 @@ def test(loader, neg_sampler, split_mode):
             perf_list.append(evaluator.eval(input_dict)[metric])
 
         # Update memory and neighbor loader with ground-truth state.
-        model['memory'].update_state(pos_src, pos_dst, pos_t, pos_msg)
-        neighbor_loader.insert(pos_src, pos_dst)
+        model['memory'].update_state(pos_src, pos_dst, pos_prod, pos_t, pos_msg)
+        neighbor_loader.insert(pos_src, pos_dst, pos_prod)
 
     perf_metrics = float(torch.tensor(perf_list).mean())
 
@@ -310,12 +299,12 @@ UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEE
 
 #open the meta file (change to flexible path later)
 import json
-with open("/lfs/turing1/0/bbyan/repos/SupplyChains/TGB/tgb/datasets/tgbl_hypergraph/tgbl-hypergraph_meta.json","r") as file:
+with open("./tgb/datasets/tgbl_hypergraph/tgbl-hypergraph_meta.json","r") as file:
     METADATA = json.load(file)
     NUM_NODES = len(METADATA["id2entity"])
 
 # set the device
-device = "cpu" # torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # data loading
 dataset = PyGLinkPropPredDatasetHyper(name=DATA, root="datasets")
@@ -339,14 +328,8 @@ min_src_idx, max_src_idx = int(data.src.min()), int(data.src.max())
 min_prod_idx, max_prod_idx = int(data.prod.min()), int(data.prod.max())
 min_dst_idx, max_dst_idx = int(data.dst.min()), int(data.dst.max())
 
-#raise ValueError("bruh")
-
 # neighhorhood sampler
-# TODO: @ Ben, check data.num_nodes accounts for both firm and product
 neighbor_loader = LastNeighborLoaderTGNPL(NUM_NODES, size=NUM_NEIGHBORS, device=device)
-
-print("num_nodes", data.msg.size(-1), NUM_NODES, METADATA["product_threshold"], data.num_nodes)
-print(args)
 NUM_PRODUCTS = NUM_NODES - METADATA["product_threshold"]
 
 # define the model end-to-end
