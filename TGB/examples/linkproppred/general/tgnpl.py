@@ -241,8 +241,9 @@ def get_tgn_args():
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
     parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
     parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
-    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating memory inventory loss', default=1e-15)
-    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating memory inventory loss', default=1e-16)
+    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating memory inventory loss', default=0)
+    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating memory inventory loss', default=0)
+    parser.add_argument('--use_inventory', type=bool, help='Use inventory', default=False)
     
     try:
         args = parser.parse_args()
@@ -303,6 +304,7 @@ PATIENCE = config.patience if WANDB else args.patience
 NUM_RUNS = config.num_run if WANDB else args.num_run
 DEBT_PENALTY = config.debt_penalty if WANDB else args.debt_penalty
 CONSUM_RWD = config.consum_rwd if WANDB else args.consum_rwd
+USE_INVENTORY = config.use_inventory if WANDB else args.use_inventory
 assert (NUM_RUNS == 1)
 
 NUM_NEIGHBORS = 10
@@ -312,7 +314,7 @@ if WANDB:
     wandb.summary["model_name"] = MODEL_NAME
 
 UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
-UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{DEBT_PENALTY}_{CONSUM_RWD}_{UNIQUE_TIME}"
+UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{DEBT_PENALTY}_{CONSUM_RWD}_{USE_INVENTORY}_{UNIQUE_TIME}"
 
 # ==========
 
@@ -355,19 +357,20 @@ NUM_PRODUCTS = NUM_NODES - NUM_FIRMS
 
 # define the model end-to-end
 memory = TGNPLMemory(
+    use_inventory = USE_INVENTORY,
     num_nodes = NUM_NODES,
     num_prods = NUM_PRODUCTS,
     raw_msg_dim = data.msg.size(-1),
     state_dim = MEM_DIM,
     time_dim = TIME_DIM,
-    message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM + NUM_PRODUCTS, TIME_DIM),
+    message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0), TIME_DIM),
     aggregator_module=MeanAggregator(),
     debt_penalty=DEBT_PENALTY,
     consumption_reward=CONSUM_RWD,
 ).to(device)
 
 gnn = GraphAttentionEmbedding(
-    in_channels=MEM_DIM + NUM_PRODUCTS,
+    in_channels=MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0),
     out_channels=EMB_DIM,
     msg_dim=data.msg.size(-1),
     time_enc=memory.time_enc,

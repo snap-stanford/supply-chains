@@ -282,8 +282,8 @@ class TGNPLMemory(torch.nn.Module):
         Compute loss on inventory and consumption. Want to maximize consumption while minimizing
         wherever consumption is larger than inventory.
         """
-        diff = inventory - consumption  # num_nodes x num_prod
-        total_debt = -torch.sum(diff[diff < 0], dim=-1)  # sum of entries where consumption is greater than inventory
+        diff = torch.maximum(consumption - inventory, torch.zeros_like(inventory)) # num_nodes x num_prod
+        total_debt = torch.sum(diff, dim=-1) # sum of entries where consumption is greater than inventory
         total_consumption = torch.sum(consumption, dim=-1)
         loss = (self.debt_penalty * total_debt) - (self.consumption_reward * total_consumption)
         return loss.sum()
