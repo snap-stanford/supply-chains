@@ -11,7 +11,7 @@ from typing import Callable, Dict, Tuple
 
 import torch
 from torch import Tensor
-from torch.nn import GRUCell, RNNCell, Linear, Parameter
+from torch.nn import GRUCell, RNNCell, Linear, Parameter, Embedding
 import torch.nn.functional as F
 
 from torch_geometric.nn.inits import zeros
@@ -86,8 +86,10 @@ class TGNPLMemory(torch.nn.Module):
         if self.use_inventory:
             self.memory_dim = self.state_dim + self.num_prods
             if self.learn_att_direct:
+                # learn attention weights directly 
                 self.att_weights = Parameter(torch.ones(size=(self.num_prods, self.num_prods), requires_grad=True))
             else:
+                # learn attention weights using product memories
                 self.prod_bilinear = Parameter(torch.ones(size=(self.state_dim, self.state_dim), requires_grad=True))
         else:
             self.memory_dim = self.state_dim
@@ -136,7 +138,7 @@ class TGNPLMemory(torch.nn.Module):
         """Detaches the memory from gradient computation."""
         self.memory.detach_()
 
-    def forward(self, n_id: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Returns, for all nodes :obj:`n_id`, their current memory and their
         last updated timestamp."""
         if self.training:
@@ -765,3 +767,45 @@ class DyRepMemory(torch.nn.Module):
                 torch.arange(self.num_nodes, device=self.memory.device))
             self._reset_message_store()
         super().train(mode)
+        
+        
+class StaticMemory(torch.nn.Module):
+    """
+    Simplest version of memory that just holds onto a learnable, static vector per node.
+    Used for debugging.
+    """
+    def __init__(self, num_nodes: int, memory_dim: int, time_dim: int):
+        super().__init__()
+        self.num_nodes = num_nodes
+        self.memory_dim = memory_dim
+        self.memory = Embedding(self.num_nodes, self.memory_dim)
+        self.time_enc = TimeEncoder(time_dim)
+        self.register_buffer("last_update", torch.empty(self.num_nodes, dtype=torch.long))
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        """Resets all learnable parameters of the module."""
+        self.memory.reset_parameters()
+        self.time_enc.reset_parameters()
+        self.reset_state()
+        
+    def reset_state(self):
+        """Resets last update to its initial state."""
+        zeros(self.last_update)
+    
+    def detach(self):
+        """Detaches the memory from gradient computation.
+        Nothing to do for this class - can't detach Embedding."""
+        pass
+        
+    def forward(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """Returns, for all nodes :obj:`n_id`, their current memory and their
+        last updated timestamp."""
+        return self.memory(n_id), self.last_update[n_id], 0
+    
+    def update_state(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, raw_msg: Tensor):
+        """Updates the memory with newly encountered interactions.
+        Nothing to do for static memory."""
+        pass
+        
+    
