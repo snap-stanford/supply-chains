@@ -33,7 +33,7 @@ from modules.emb_module import GraphAttentionEmbedding
 from modules.msg_func import TGNPLMessage
 from modules.msg_agg import MeanAggregator
 from modules.neighbor_loader import LastNeighborLoaderTGNPL
-from modules.memory_module import TGNPLMemory
+from modules.memory_module import TGNPLMemory, StaticMemory
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPredDatasetHyper
 
@@ -169,7 +169,8 @@ def test(loader, neg_sampler, split_mode):
     model['link_pred'].eval()
 
     perf_list = []
-
+    batch_size = []
+    
     for pos_batch in tqdm(loader):
         pos_src, pos_prod, pos_dst, pos_t, pos_msg = (
             pos_batch.src,
@@ -178,48 +179,53 @@ def test(loader, neg_sampler, split_mode):
             pos_batch.t,
             pos_batch.msg,
         )
+        bs = len(pos_src)  # batch size
 
         neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
+        assert len(neg_batch_list) == bs
+        neg_batch_list = torch.Tensor(neg_batch_list)
+        ns_samples = neg_batch_list.size(1) // 3 
+        batch_src = pos_src.reshape(bs, 1).repeat(1, 1+(3*ns_samples))  # [[src1, src1, ...], [src2, src2, ...]]
+        batch_src[:, 1:ns_samples+1] = neg_batch_list[:, :ns_samples]  # replace pos_src with negatives
+        batch_prod = pos_prod.reshape(bs, 1).repeat(1, 1+(3*ns_samples))
+        batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_batch_list[:, ns_samples:(2*ns_samples)]  # replace pos_prod with negatives
+        batch_dst = pos_dst.reshape(bs, 1).repeat(1, 1+(3*ns_samples))
+        batch_dst[:, (2*ns_samples)+1:] = neg_batch_list[:, (2*ns_samples):]  # replace pos_dst with negatives
+        
+        src, dst, prod = batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten()  # row-wise
+        f_id = torch.cat([src, dst]).unique()
+        p_id = torch.cat([prod]).unique()
+        
+        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
+        assoc[n_id] = torch.arange(n_id.size(0), device=device)
+            
+        # Get updated memory of all nodes involved in the computation.
+        memory, last_update, inv_loss = model['memory'](n_id)
+        z = model['gnn'](
+            memory,
+            last_update,
+            edge_index,
+            repeat_tensor(data.t, 2)[e_id].to(device),
+            repeat_tensor(data.msg, 2)[e_id].to(device),
+        )
 
-        for idx, neg_batch in enumerate(neg_batch_list):
-            ns_samples = len(neg_batch) // 3 
-            src = torch.tensor([pos_src[idx]] + neg_batch[:ns_samples] + [pos_src[idx] for _ in range(ns_samples * 2)], device=device)
-            prod = torch.tensor([pos_prod[idx]] + [pos_prod[idx] for _ in range(ns_samples)] + neg_batch[ns_samples:ns_samples * 2] + [pos_prod[idx] for _ in range(ns_samples)], device=device)
-            dst = torch.tensor([pos_dst[idx]] + [pos_dst[idx] for _ in range(ns_samples * 2)] + neg_batch[ns_samples * 2:], device=device)
-
-            f_id = torch.cat([src, dst]).unique()
-            p_id = torch.cat([prod]).unique()
-
-            n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
-            assoc[n_id] = torch.arange(n_id.size(0), device=device)
-
-            # Get updated memory of all nodes involved in the computation.
-            memory, last_update, inv_loss = model['memory'](n_id)
-            z = model['gnn'](
-                memory,
-                last_update,
-                edge_index,
-                repeat_tensor(data.t, 2)[e_id].to(device),
-                repeat_tensor(data.msg, 2)[e_id].to(device),
-            )
-
-            y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
-
-            # compute MRR
-            input_dict = {
-                "y_pred_pos": np.array([y_pred[0, :].squeeze(dim=-1).cpu()]),
-                "y_pred_neg": np.array(y_pred[1:, :].squeeze(dim=-1).cpu()),
-                "eval_metric": [metric],
-            }
-            perf_list.append(evaluator.eval(input_dict)[metric])
+        y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
+        y_pred = y_pred.reshape(bs, 1+(3*ns_samples))
+        input_dict = {
+            "y_pred_pos": y_pred[:, :1],
+            "y_pred_neg": y_pred[:, 1:],
+            "eval_metric": [metric]
+        }
+        perf_list.append(evaluator.eval(input_dict)[metric])
+        batch_size.append(len(pos_src))
 
         # Update memory and neighbor loader with ground-truth state.
         model['memory'].update_state(pos_src, pos_dst, pos_prod, pos_t, pos_msg)
         neighbor_loader.insert(pos_src, pos_dst, pos_prod)
-    print("\n\n input dict:", input_dict)
-    print("\n\nPerformance", perf_list)
-    perf_metrics = float(torch.tensor(perf_list).mean())
-
+    
+    num = (torch.tensor(perf_list) * torch.tensor(batch_size)).sum()
+    denom = torch.tensor(batch_size).sum()
+    perf_metrics = float(num/denom)
     return perf_metrics
 
 import argparse 
@@ -271,6 +277,7 @@ start_overall = timeit.default_timer()
 
 # ========== set parameters...
 args, defaults, _ = get_tgn_args()
+print(args)
 labeling_args = compare_args(args, defaults)
 MODEL_NAME = 'TGNPL'
 
@@ -356,18 +363,19 @@ NUM_FIRMS = METADATA["product_threshold"]
 NUM_PRODUCTS = NUM_NODES - NUM_FIRMS
 
 # define the model end-to-end
-memory = TGNPLMemory(
-    use_inventory = USE_INVENTORY,
-    num_nodes = NUM_NODES,
-    num_prods = NUM_PRODUCTS,
-    raw_msg_dim = data.msg.size(-1),
-    state_dim = MEM_DIM,
-    time_dim = TIME_DIM,
-    message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0), TIME_DIM),
-    aggregator_module=MeanAggregator(),
-    debt_penalty=DEBT_PENALTY,
-    consumption_reward=CONSUM_RWD,
-).to(device)
+# memory = TGNPLMemory(
+#     use_inventory = USE_INVENTORY,
+#     num_nodes = NUM_NODES,
+#     num_prods = NUM_PRODUCTS,
+#     raw_msg_dim = data.msg.size(-1),
+#     state_dim = MEM_DIM,
+#     time_dim = TIME_DIM,
+#     message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0), TIME_DIM),
+#     aggregator_module=MeanAggregator(),
+#     debt_penalty=DEBT_PENALTY,
+#     consumption_reward=CONSUM_RWD,
+# ).to(device)
+memory = StaticMemory(num_nodes = NUM_NODES, memory_dim = MEM_DIM, time_dim = TIME_DIM).to(device)
 
 gnn = GraphAttentionEmbedding(
     in_channels=MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0),
