@@ -247,9 +247,10 @@ def get_tgn_args():
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
     parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
     parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
-    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating memory inventory loss', default=0)
-    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating memory inventory loss', default=0)
-    parser.add_argument('--use_inventory', type=bool, help='Use inventory', default=False)
+    parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
+    parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory in TGNPL memory', default=False)
+    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating TGNPL memory inventory loss', default=0)
+    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating TGNPL memory inventory loss', default=0)
     
     try:
         args = parser.parse_args()
@@ -309,25 +310,25 @@ EMB_DIM = config.emb_dim if WANDB else args.emb_dim
 TOLERANCE = config.tolerance if WANDB else args.tolerance
 PATIENCE = config.patience if WANDB else args.patience
 NUM_RUNS = config.num_run if WANDB else args.num_run
+MEMORY_NAME = config.memory_name if WANDB else args.memory_name
+USE_INVENTORY = config.use_inventory if WANDB else args.use_inventory
 DEBT_PENALTY = config.debt_penalty if WANDB else args.debt_penalty
 CONSUM_RWD = config.consum_rwd if WANDB else args.consum_rwd
-USE_INVENTORY = config.use_inventory if WANDB else args.use_inventory
 assert (NUM_RUNS == 1)
 
 NUM_NEIGHBORS = 10
-MODEL_NAME = 'TGNPL'
 if WANDB:
     wandb.summary["num_neighbors"] = NUM_NEIGHBORS
     wandb.summary["model_name"] = MODEL_NAME
 
 UNIQUE_TIME = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
-UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{DEBT_PENALTY}_{CONSUM_RWD}_{USE_INVENTORY}_{UNIQUE_TIME}"
+UNIQUE_NAME = f"{MODEL_NAME}_{DATA}_{LR}_{BATCH_SIZE}_{K_VALUE}_{NUM_EPOCH}_{SEED}_{MEM_DIM}_{TIME_DIM}_{EMB_DIM}_{TOLERANCE}_{PATIENCE}_{NUM_RUNS}_{NUM_NEIGHBORS}_{MEMORY_NAME}_{USE_INVENTORY}_{DEBT_PENALTY}_{CONSUM_RWD}_{UNIQUE_TIME}"
 
 # ==========
 
-#open the meta file (change to flexible path later)
+# open the meta file (change to flexible path later)
 import json
-with open(f"/lfs/turing1/0/zhiyinl/supply-chains/TGB/tgb/datasets/{DATA.replace('-', '_')}/{DATA}_meta.json","r") as file:
+with open(f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{DATA.replace('-', '_')}/{DATA}_meta.json","r") as file:
     METADATA = json.load(file)
     NUM_NODES = len(METADATA["id2entity"])
 
@@ -363,19 +364,23 @@ NUM_FIRMS = METADATA["product_threshold"]
 NUM_PRODUCTS = NUM_NODES - NUM_FIRMS
 
 # define the model end-to-end
-# memory = TGNPLMemory(
-#     use_inventory = USE_INVENTORY,
-#     num_nodes = NUM_NODES,
-#     num_prods = NUM_PRODUCTS,
-#     raw_msg_dim = data.msg.size(-1),
-#     state_dim = MEM_DIM,
-#     time_dim = TIME_DIM,
-#     message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0), TIME_DIM),
-#     aggregator_module=MeanAggregator(),
-#     debt_penalty=DEBT_PENALTY,
-#     consumption_reward=CONSUM_RWD,
-# ).to(device)
-memory = StaticMemory(num_nodes = NUM_NODES, memory_dim = MEM_DIM, time_dim = TIME_DIM).to(device)
+if MEMORY_NAME == 'tgnpl':
+    memory = TGNPLMemory(
+        use_inventory = USE_INVENTORY,
+        num_nodes = NUM_NODES,
+        num_prods = NUM_PRODUCTS,
+        raw_msg_dim = data.msg.size(-1),
+        state_dim = MEM_DIM,
+        time_dim = TIME_DIM,
+        message_module=TGNPLMessage(data.msg.size(-1), MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0), TIME_DIM),
+        aggregator_module=MeanAggregator(),
+        debt_penalty=DEBT_PENALTY,
+        consumption_reward=CONSUM_RWD,
+    ).to(device)
+else:
+    assert MEMORY_NAME == 'static'
+    assert not USE_INVENTORY
+    memory = StaticMemory(num_nodes = NUM_NODES, memory_dim = MEM_DIM, time_dim = TIME_DIM).to(device)
 
 gnn = GraphAttentionEmbedding(
     in_channels=MEM_DIM+(NUM_PRODUCTS if USE_INVENTORY else 0),
@@ -434,6 +439,7 @@ for run_idx in range(NUM_RUNS):
     # loading the validation negative samples
     dataset.load_val_ns()
 
+    train_loss_list = []
     val_perf_list = []
     start_train_val = timeit.default_timer()
     for epoch in range(1, NUM_EPOCH + 1):
@@ -444,6 +450,7 @@ for run_idx in range(NUM_RUNS):
         print(
             f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Training elapsed Time (s): {TIME_TRAIN: .4f}"
         )
+        train_loss_list.append(float(loss))
 
         # validation
         start_val = timeit.default_timer()
@@ -496,6 +503,7 @@ for run_idx in range(NUM_RUNS):
                   'data': DATA,
                   'run': run_idx,
                   'seed': SEED,
+                  'train loss': train_loss_list,
                   f'val {metric}': val_perf_list,
                   f'test {metric}': perf_metric_test,
                   'test_time': test_time,
