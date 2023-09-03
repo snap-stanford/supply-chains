@@ -236,9 +236,11 @@ class TGNPLMemory(torch.nn.Module):
         
         # Get local copy of updated inventory
         if self.use_inventory:
-            total_consumed = self._compute_internal_consumption(n_id, self.msg_s_store, prod_emb)
+            total_consumed = self._compute_internal_consumption(n_id, prod_emb)
+            assert inventory.shape == total_consumed.shape
+            assert total_consumed.shape == (len(n_id), self.num_prods)
             inv_loss = self._compute_inventory_loss(inventory, total_consumed)
-            total_bought = self._compute_new_inputs(n_id, self.msg_d_store)
+            total_bought = self._compute_new_inputs(n_id)
             if self.debug:
                 print('Total consumed:', total_consumed)
                 print('Total loss:', inv_loss)
@@ -253,13 +255,11 @@ class TGNPLMemory(torch.nn.Module):
             print('memory', memory)
         return memory, last_update, inv_loss
     
-    def _compute_internal_consumption(
-        self, n_id: Tensor, msg_store: TGNMessageStoreType, prod_emb: Tensor = None,
-    ):
+    def _compute_internal_consumption(self, n_id: Tensor, prod_emb: Tensor = None):
         """
-        Compute the amount consumed by suppliers, for the interactions in msg_store.
+        Compute the amount consumed by n_id, using msg_store keyed by src.
         """
-        data = [msg_store[i] for i in n_id.tolist()]
+        data = [self.msg_s_store[i] for i in n_id.tolist()]
         src, dst, prod, t, raw_msg = list(zip(*data))  # unzip
         
         # Get total amount supplied per firm, product 
@@ -284,19 +284,17 @@ class TGNPLMemory(torch.nn.Module):
         Compute loss on inventory and consumption. Want to maximize consumption while minimizing
         wherever consumption is larger than inventory.
         """
-        diff = torch.maximum(consumption - inventory, torch.zeros_like(inventory)) # num_nodes x num_prod
-        total_debt = torch.sum(diff, dim=-1) # sum of entries where consumption is greater than inventory
-        total_consumption = torch.sum(consumption, dim=-1)
+        diff = torch.maximum(consumption - inventory, torch.zeros_like(inventory))  # len(n_id) x num_prod
+        total_debt = torch.sum(diff, dim=-1)  # len(n_id), sum of entries where consumption is greater than inventory
+        total_consumption = torch.sum(consumption, dim=-1)  # len(n_id)
         loss = (self.debt_penalty * total_debt) - (self.consumption_reward * total_consumption)
-        return loss.sum()
+        return loss.mean()
         
-    def _compute_new_inputs(
-        self, n_id: Tensor, msg_store: TGNMessageStoreType
-    ):
+    def _compute_new_inputs(self, n_id: Tensor):
         """
-        Compute the amount received by buyers, for the interactions in msg_store.
+        Compute the amount received by n_id, using msg_store keyed by dst. 
         """
-        data = [msg_store[i] for i in n_id.tolist()]
+        data = [self.msg_d_store[i] for i in n_id.tolist()]
         src, dst, prod, t, raw_msg = list(zip(*data))  # unzip
         
         # Get total amount received per firm, product 
