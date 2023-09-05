@@ -16,13 +16,15 @@ class LinkPredictorTGNPL(torch.nn.Module):
 
     def __init__(self, in_channels):
         super().__init__()
-        self.lin_src = Linear(in_channels, in_channels)
-        self.lin_dst = Linear(in_channels, in_channels)
-        self.lin_prod = Linear(in_channels, in_channels)
+#         self.lin_src = Linear(in_channels, in_channels)
+#         self.lin_dst = Linear(in_channels, in_channels)
+#         self.lin_prod = Linear(in_channels, in_channels)
+        self.lin_hidden = Linear(in_channels * 3, in_channels)
         self.lin_final = Linear(in_channels, 1)
 
     def forward(self, z_src, z_dst, z_prod):
-        h = self.lin_src(z_src) + self.lin_dst(z_dst) + self.lin_prod(z_prod)
+#         h = self.lin_src(z_src) + self.lin_dst(z_dst) + self.lin_prod(z_prod)
+        h = self.lin_hidden(torch.cat([z_src, z_dst, z_prod], dim=1))
         h = h.relu()
         return self.lin_final(h)
 
