@@ -43,13 +43,106 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPred
 # ===========================================
 # Main functions to train and test model
 # ===========================================
-def train(model, optimizer, neighbor_loader, data, data_loader, device, loss_name='ce-softmax',
-          update_params=True, num_nodes=None, num_firms=None, num_products=None):
+def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+                          ns_samples=1, neg_sampler=None, split_mode="val",
+                          num_firms=None, num_products=None):
+    """
+    Get model scores for a batch's positive edges and its corresponding negative samples.
+    If neg_sampler is None, sample negative samples at random.
+    Parameters:
+        batch: a batch from data loader
+        model: a dict of model modules (memory, gnn, link_pred)
+        neighbor_loader: stores and loads temporal graph
+        data: object holding onto all data
+        device: current device
+        ns_samples: how many negative samples to draw per src/prod/dst; only used if neg_sampler is None
+        neg_sampler: a sampler with fixed negative samples
+        split_mode: in ['val', 'test'], used for neg_sampler
+        num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
+        num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
+    Returns:
+        y_pred: shape is (batch size) x (1 + # negative samples)
+    """
+    # use global variables when arguments are not specified
+    if num_firms is None:
+        num_firms = NUM_FIRMS
+    if num_products is None:
+        num_products = NUM_PRODUCTS
+    num_nodes = num_firms + num_products
+    # Helper vector to map global node indices to local ones
+    assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
+    
+    pos_src, pos_prod, pos_dst, pos_t, pos_msg = batch.src, batch.prod, batch.dst, batch.t, batch.msg
+    bs = len(pos_src)  # batch size
+    
+    if neg_sampler is None:
+        # sample negatives        
+        neg_src = torch.randint(
+            0,  # min firm idx
+            num_firms,  # max firm idx+1
+            (bs, ns_samples),
+            dtype=torch.long,
+            device=device,
+        )        
+        neg_prod = torch.randint(
+            num_firms,  # min product idx
+            num_firms+num_products,  # max product idx+1
+            (bs, ns_samples),
+            dtype=torch.long,
+            device=device,
+        )
+        neg_dst = torch.randint(
+            0,
+            num_firms,
+            (bs, ns_samples),
+            dtype=torch.long,
+            device=device,
+        )
+    else:
+        # use fixed negatives
+        neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
+        assert len(neg_batch_list) == bs
+        neg_batch_list = torch.Tensor(neg_batch_list)
+        ns_samples = neg_batch_list.size(1) // 3  # num negative samples per src/prod/dst
+        neg_src = neg_batch_list[:, :ns_samples]   # we assume neg batch is ordered by neg_src, neg_prod, neg_dst
+        neg_prod = neg_batch_list[:, ns_samples:(2*ns_samples)]  
+        neg_dst = neg_batch_list[:, (2*ns_samples):]  
+        
+    num_samples = (3*ns_samples)+1  # total num samples per data point
+    batch_src = pos_src.reshape(bs, 1).repeat(1, num_samples)  # [[src1, src1, ...], [src2, src2, ...]]
+    batch_src[:, 1:ns_samples+1] = neg_src  # replace pos_src with negatives
+    batch_prod = pos_prod.reshape(bs, 1).repeat(1, num_samples)
+    batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_prod  # replace pos_prod with negatives
+    batch_dst = pos_dst.reshape(bs, 1).repeat(1, num_samples)
+    batch_dst[:, (2*ns_samples)+1:] = neg_dst  # replace pos_dst with negatives
+
+    src, dst, prod = batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten()  # row-wise flatten
+    f_id = torch.cat([src, dst]).unique()
+    p_id = torch.cat([prod]).unique()
+    n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
+    assoc[n_id] = torch.arange(n_id.size(0), device=device)
+
+    # Get updated memory of all nodes involved in the computation.
+    memory, last_update, inv_loss = model['memory'](n_id)
+    z = model['gnn'](
+        memory,
+        last_update,
+        edge_index,
+        repeat_tensor(data.t, 2)[e_id].to(device),
+        repeat_tensor(data.msg, 2)[e_id].to(device),
+    )
+
+    y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
+    y_pred = y_pred.reshape(bs, num_samples)
+    return y_pred
+    
+
+def train(model, optimizer, neighbor_loader, data, data_loader, device, 
+          loss_name='ce-softmax', update_params=True, 
+          ns_samples=1, neg_sampler=None, split_mode="val",
+          num_firms=None, num_products=None):
     """
     Training procedure for TGN-PL model.
-    During training, we randomly sample 3 negatives for each positive edge. Then the loss criterion
-    is either binary cross entropy or multi-class softmax, cross entropy.
-
     Parameters:
         model: a dict of model modules (memory, gnn, link_pred)
         optimizer: torch optimizer linked to model parameters
@@ -58,18 +151,13 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device, loss_nam
         data_loader: loader for the train data
         device: current device
         loss_name: in ['ce-softmax', 'bce-logits']
+        update_params: bool, whether to update model params
+        neg_sampler: usually None. Provide if you want to train on fixed negative samples.
+        split_mode: in ['val', 'test'], used for neg_sampler
     Returns:
         None
     """
-    assert loss_name in ['ce-softmax', 'bce-logits']
-    # use global variables when arguments are not specified
-    if num_nodes is None:
-        num_nodes = NUM_NODES
-    if num_firms is None:
-        num_firms = NUM_FIRMS
-    if num_products is None:
-        num_products = NUM_PRODUCTS
-    
+    assert loss_name in ['ce-softmax', 'bce-logits']    
     if update_params:
         model['memory'].train()
         model['gnn'].train()
@@ -81,8 +169,6 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device, loss_nam
 
     model['memory'].reset_state()  # Start with a fresh memory.
     neighbor_loader.reset_state()  # Start with an empty graph.
-    # Helper vector to map global node indices to local ones
-    assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
     
     if loss_name == 'ce-softmax':
         # softmax then cross entropy
@@ -97,66 +183,22 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device, loss_nam
         if update_params:
             optimizer.zero_grad()
 
-        src, prod, dst, t, msg = batch.src, batch.prod, batch.dst, batch.t, batch.msg # Note: msg is amount
-        
-        # Sample negative source, product, destination nodes.
-        neg_src = torch.randint(
-            0,  # min firm idx
-            num_firms,  # max firm idx+1
-            (src.size(0),),
-            dtype=torch.long,
-            device=device,
-        )
-         
-        neg_prod = torch.randint(
-            num_firms,  # min product idx
-            num_firms+num_products,  # max product idx+1
-            (src.size(0),),
-            dtype=torch.long,
-            device=device,
-        )
-
-        neg_dst = torch.randint(
-            0,
-            num_firms,
-            (src.size(0),),
-            dtype=torch.long,
-            device=device,
-        )
-        
-        f_id = torch.cat([src, dst, neg_src, neg_dst]).unique()
-        p_id = torch.cat([prod, neg_prod]).unique()
-        # 'n_id' indexes both firm and product nodes (positive and negative),'edge_index' are relevant firm-product and product-firm edges
-        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
-        assoc[n_id] = torch.arange(n_id.size(0), device=device)
-        
-        # Get updated memory of all nodes involved in the computation.
-        memory, last_update, inv_loss = model['memory'](n_id)
-        
-        z = model['gnn'](
-            memory,
-            last_update,
-            edge_index,
-            repeat_tensor(data.t, 2)[e_id].to(device),
-            repeat_tensor(data.msg, 2)[e_id].to(device),
-        )
-
-        pos_out = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
-        neg_out_src = model['link_pred'](z[assoc[neg_src]], z[assoc[dst]], z[assoc[prod]])
-        neg_out_prod = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[neg_prod]])
-        neg_out_dst = model['link_pred'](z[assoc[src]], z[assoc[neg_dst]], z[assoc[prod]])
+        y_pred = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+                                       ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
+                                       num_firms=num_firms, num_products=num_products)
         
         if loss_name == 'ce-softmax':
-            loss_input = torch.cat([pos_out.reshape(-1, 1), neg_out_src.reshape(-1, 1),
-                                    neg_out_prod.reshape(-1, 1), neg_out_dst.reshape(-1, 1)], dim=1)
-            target = torch.zeros(len(pos_out), device=device).long()  # positive always in first position
-            logits_loss = criterion(loss_input, target)
+            target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
+            logits_loss = criterion(y_pred, target)
         else:
+            # original loss from TGB
+            assert y_pred.size(1) == (3*ns_samples)+1
+            pos_out = y_pred[:, :1]
+            neg_out = y_pred[:, 1:]            
             logits_loss = criterion(pos_out, torch.ones_like(pos_out))
-            logits_loss += criterion(neg_out_src, torch.zeros_like(neg_out_src))
-            logits_loss += criterion(neg_out_prod, torch.zeros_like(neg_out_prod))
-            logits_loss += criterion(neg_out_dst, torch.zeros_like(neg_out_dst))
+            logits_loss += criterion(neg_out, torch.zeros_like(neg_out))
         
+        inv_loss = 0  # TODO
         loss = logits_loss + inv_loss
         total_loss += float(loss) * batch.num_events  # scale by batch size
         total_logits_loss += float(logits_loss) * batch.num_events
@@ -164,8 +206,8 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device, loss_nam
         total_num_events += batch.num_events
         
         # Update memory and neighbor loader with ground-truth state.
-        model['memory'].update_state(src, dst, prod, t, msg)
-        neighbor_loader.insert(src, dst, prod)
+        model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
+        neighbor_loader.insert(batch.src, batch.dst, batch.prod)
         
         # Update model parameters with backprop
         if update_params:
@@ -177,7 +219,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device, loss_nam
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
-         split_mode="val", metric="mrr", num_nodes=None):
+         split_mode="val", metric="mrr", num_firms=None, num_products=None):
     """
     Evaluation procedure for TGN-PL model.
     Evaluation happens as 'one vs. many', meaning that each positive edge is evaluated against many negative edges
@@ -197,9 +239,6 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     """
     assert split_mode in ['val', 'test']
     assert metric in ['mrr', 'hits@']
-    # use global variables when arguments are not specified
-    if num_nodes is None:
-        num_nodes = NUM_NODES
         
     model['memory'].eval()
     model['gnn'].eval()
@@ -207,65 +246,28 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
 
     perf_list = []
     batch_size = []
-    # Helper vector to map global node indices to local ones
-    assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
     
-    for pos_batch in tqdm(data_loader):
-        pos_src, pos_prod, pos_dst, pos_t, pos_msg = (
-            pos_batch.src,
-            pos_batch.prod,
-            pos_batch.dst,
-            pos_batch.t,
-            pos_batch.msg,
-        )
-        bs = len(pos_src)  # batch size
-
-        neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
-        assert len(neg_batch_list) == bs
-        neg_batch_list = torch.Tensor(neg_batch_list)
-        ns_samples = neg_batch_list.size(1) // 3 
-        batch_src = pos_src.reshape(bs, 1).repeat(1, 1+(3*ns_samples))  # [[src1, src1, ...], [src2, src2, ...]]
-        batch_src[:, 1:ns_samples+1] = neg_batch_list[:, :ns_samples]  # replace pos_src with negatives
-        batch_prod = pos_prod.reshape(bs, 1).repeat(1, 1+(3*ns_samples))
-        batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_batch_list[:, ns_samples:(2*ns_samples)]  # replace pos_prod with negatives
-        batch_dst = pos_dst.reshape(bs, 1).repeat(1, 1+(3*ns_samples))
-        batch_dst[:, (2*ns_samples)+1:] = neg_batch_list[:, (2*ns_samples):]  # replace pos_dst with negatives
-        
-        src, dst, prod = batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten()  # row-wise
-        f_id = torch.cat([src, dst]).unique()
-        p_id = torch.cat([prod]).unique()
-        
-        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
-        assoc[n_id] = torch.arange(n_id.size(0), device=device)
-            
-        # Get updated memory of all nodes involved in the computation.
-        memory, last_update, inv_loss = model['memory'](n_id)
-        z = model['gnn'](
-            memory,
-            last_update,
-            edge_index,
-            repeat_tensor(data.t, 2)[e_id].to(device),
-            repeat_tensor(data.msg, 2)[e_id].to(device),
-        )
-
-        y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
-        y_pred = y_pred.reshape(bs, 1+(3*ns_samples))
+    for batch in tqdm(data_loader):
+        y_pred = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+                                       neg_sampler=neg_sampler, split_mode=split_mode,
+                                       num_firms=num_firms, num_products=num_products)
         input_dict = {
             "y_pred_pos": y_pred[:, :1],
             "y_pred_neg": y_pred[:, 1:],
             "eval_metric": [metric]
         }
         perf_list.append(evaluator.eval(input_dict)[metric])
-        batch_size.append(len(pos_src))
+        batch_size.append(y_pred.size(0))
 
         # Update memory and neighbor loader with ground-truth state.
-        model['memory'].update_state(pos_src, pos_dst, pos_prod, pos_t, pos_msg)
-        neighbor_loader.insert(pos_src, pos_dst, pos_prod)
+        model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
+        neighbor_loader.insert(batch.src, batch.dst, batch.prod)
     
     num = (torch.tensor(perf_list) * torch.tensor(batch_size)).sum()
     denom = torch.tensor(batch_size).sum()
     perf_metrics = float(num/denom)
     return perf_metrics
+
 
 # ===========================================
 # Helper functions
@@ -345,19 +347,19 @@ def get_unique_id_for_experiment(args):
 MODEL_NAME = 'TGNPL'
 NUM_NEIGHBORS = 10
 PATH_TO_DATASETS = f'/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
-NUM_NODES = -1
 NUM_FIRMS = -1
 NUM_PRODUCTS = -1    
     
-def set_up_model(args, data, device, num_nodes=None, num_products=None):
+def set_up_model(args, data, device, num_firms=None, num_products=None):
     """
     Initialize model modules based on args.
     """
     # use global variables when arguments are not specified
-    if num_nodes is None:
-        num_nodes = NUM_NODES
+    if num_firms is None:
+        num_firms = NUM_FIRMS
     if num_products is None:
         num_products = NUM_PRODUCTS
+    num_nodes = num_firms + num_products
 
     # initialize memory module
     mem_out = args.mem_dim+num_products if args.use_inventory else args.mem_dim
@@ -404,7 +406,7 @@ def run_experiment(args):
     """
     Run a complete experiment.
     """
-    global NUM_NODES, NUM_FIRMS, NUM_PRODUCTS  # add this to modify global variables
+    global NUM_FIRMS, NUM_PRODUCTS  # add this to modify global variables
     print('Starting...')
     start_overall = timeit.default_timer()
     exp_id = get_unique_id_for_experiment(args)
@@ -445,9 +447,9 @@ def run_experiment(args):
     with open(os.path.join(PATH_TO_DATASETS, f"{args.dataset.replace('-', '_')}/{args.dataset}_meta.json"), "r") as f:
         metadata = json.load(f)
     # set global data variables
-    NUM_NODES = len(metadata["id2entity"])  
+    num_nodes = len(metadata["id2entity"])  
     NUM_FIRMS = metadata["product_threshold"]
-    NUM_PRODUCTS = NUM_NODES - NUM_FIRMS              
+    NUM_PRODUCTS = num_nodes - NUM_FIRMS              
     dataset = PyGLinkPropPredDatasetHyper(name=args.dataset, root="datasets")
     metric = dataset.eval_metric
     neg_sampler = dataset.negative_sampler
@@ -461,7 +463,7 @@ def run_experiment(args):
     # Initialize model
     model, opt = set_up_model(args, data, device)
     # Initialize neighbor loader
-    neighbor_loader = LastNeighborLoaderTGNPL(NUM_NODES, size=NUM_NEIGHBORS, device=device)
+    neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=NUM_NEIGHBORS, device=device)
 
     print("==========================================================")
     print(f"=================*** {MODEL_NAME}: LinkPropPred: {args.dataset} ***=============")
