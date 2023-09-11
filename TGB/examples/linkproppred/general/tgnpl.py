@@ -44,7 +44,7 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPred
 # Main functions to train and test model
 # ===========================================
 def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
-                          ns_samples=1, neg_sampler=None, split_mode="val",
+                          ns_samples=6, neg_sampler=None, split_mode="val",
                           num_firms=None, num_products=None):
     """
     Get model scores for a batch's positive edges and its corresponding negative samples.
@@ -139,7 +139,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', update_params=True, 
-          ns_samples=1, neg_sampler=None, split_mode="val",
+          ns_samples=6, neg_sampler=None, split_mode="val",
           num_firms=None, num_products=None):
     """
     Training procedure for TGN-PL model.
@@ -519,7 +519,7 @@ def run_experiment(args):
                   'seed': args.seed,
                   'train loss': train_loss_list,
                   f'val {metric}': val_perf_list,}, 
-                    results_filename)
+                    results_filename, replace_file=True)
 
             # check if best on val so far, save if so, stop if no improvement observed for a while
             if early_stopper.step_check(perf_metric_val, model):
