@@ -70,13 +70,13 @@ def get_args():
     return args, sys.argv
 
 
-def save_results(new_results: dict, filename: str):
+def save_results(new_results: dict, filename: str, replace_file=False):
     r"""
     save (new) results into a json file
     :param: new_results (dictionary): a dictionary of new results to be saved
     :filename: the name of the file to save the (new) results
     """
-    if os.path.isfile(filename):
+    if os.path.isfile(filename) and not replace_file:
         # append to the file
         with open(filename, 'r+') as json_file:
             file_data = json.load(json_file)
