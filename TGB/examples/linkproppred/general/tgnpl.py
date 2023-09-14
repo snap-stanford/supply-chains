@@ -308,6 +308,7 @@ def get_tgn_args():
     parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating TGNPL memory inventory loss', default=0)
     parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating TGNPL memory inventory loss', default=0)
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
     
     try:
         args = parser.parse_args()
@@ -462,6 +463,14 @@ def run_experiment(args):
     
     # Initialize model
     model, opt = set_up_model(args, data, device)
+    if args.weights != "":
+        print('Initializing model with weights from', args.weights)
+        model_path = os.path.join(save_model_dir, args.weights)
+        assert os.path.isfile(model_path)
+        saved_model = torch.load(model_path)
+        for module_name, module in model.items():
+            module.load_state_dict(saved_model[module_name])
+    
     # Initialize neighbor loader
     neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=NUM_NEIGHBORS, device=device)
 
@@ -563,7 +572,7 @@ def run_experiment(args):
                       'test_time': test_time,
                       'tot_train_val_time': train_val_time
                       }, 
-        results_filename)
+            results_filename, replace_file=True)
 
         print(f"INFO: >>>>> Run: {run_idx}, elapsed time: {timeit.default_timer() - start_run: .4f} <<<<<")
         print('-------------------------------------------------------------------------------')
