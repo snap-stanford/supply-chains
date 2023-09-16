@@ -1,11 +1,3 @@
-"""
-Dynamic Link Prediction with a TGN model with Early Stopping
-Reference: 
-    - https://github.com/pyg-team/pytorch_geometric/blob/master/examples/tgn.py
-
-command for an example run:
-    python examples/linkproppred/tgbl-wiki/tgn.py --data "tgbl-wiki" --num_run 1 --seed 1
-"""
 import wandb
 import math
 import timeit
@@ -41,7 +33,7 @@ from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPredDatasetHyper
 
 # ===========================================
-# Main functions to train and test model
+# == Main functions to train and test model
 # ===========================================
 def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                           ns_samples=6, neg_sampler=None, split_mode="val",
@@ -61,7 +53,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
     Returns:
-        y_pred: shape is (batch size) x (1 + # negative samples)
+        y_pred: shape is (batch size) x (1 + 3*ns_samples)
     """
     # use global variables when arguments are not specified
     if num_firms is None:
@@ -152,10 +144,13 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         device: current device
         loss_name: in ['ce-softmax', 'bce-logits']
         update_params: bool, whether to update model params
+        ns_samples: how many negative samples to draw per src/prod/dst; only used if neg_sampler is None
         neg_sampler: usually None. Provide if you want to train on fixed negative samples.
         split_mode: in ['val', 'test'], used for neg_sampler
+        num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
+        num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
     Returns:
-        None
+        total loss, logits loss (from dynamic link prediction), inventory loss
     """
     assert loss_name in ['ce-softmax', 'bce-logits']    
     if update_params:
@@ -229,11 +224,13 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         neighbor_loader: stores and loads temporal graph
         data: object holding onto all data
         data_loader: loader for the test data
-        neg_sampler: gives negative edges corresponding to each positive edge
+        neg_sampler: a sampler with fixed negative samples
         evaluator: evaluator object that evaluates one vs many performance
         device: current device
         split_mode: in ['val', 'test'], specifies which set we are in to correctly load negatives
         metric: in ['mrr', 'hits@'], which metric to use in evaluator
+        num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
+        num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
     Returns:
         perf_metric: the result of the performance evaluaiton
     """
@@ -270,7 +267,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
 
 
 # ===========================================
-# Helper functions
+# == Helper functions
 # ===========================================
 def repeat_tensor(t, k):
     """
@@ -284,7 +281,7 @@ def repeat_tensor(t, k):
     else:
         raise Exception("repeat_tensor: Not Applicable")
 
-def get_tgn_args():
+def get_tgnpl_args():
     """
     Parse args from command line.
     """
@@ -342,7 +339,7 @@ def get_unique_id_for_experiment(args):
 
     
 # ===========================================
-# Functions to run complete experiments
+# == Functions to run complete experiments
 # ===========================================
 # Global variables
 MODEL_NAME = 'TGNPL'
@@ -585,6 +582,6 @@ def run_experiment(args):
 
 if __name__ == "__main__":
     # Parse parameters
-    args, defaults, _ = get_tgn_args()
+    args, defaults, _ = get_tgnpl_args()
     labeling_args = compare_args(args, defaults)
     run_experiment(args)
