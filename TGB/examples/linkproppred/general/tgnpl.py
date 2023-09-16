@@ -306,6 +306,7 @@ def get_tgnpl_args():
     parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating TGNPL memory inventory loss', default=0)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
+    parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
     
     try:
         args = parser.parse_args()
@@ -399,6 +400,30 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         lr=args.lr,
     )
     return model, optimizer
+  
+def split_data(args, data, dataset):
+    """
+    Split data into train, val, test.
+    """
+    if args.num_train_days == -1:
+        train_data = data[dataset.train_mask]
+    else:
+        assert args.num_train_days > 0
+        train_days = data.t[dataset.train_mask].unique()  # original set of train days
+        days_to_keep = train_days[-args.num_train_days:]  # keep train days from the end, since val follows train
+        new_train_mask = torch.isin(data.t, days_to_keep)
+        train_data = data[new_train_mask]
+    val_data = data[dataset.val_mask]
+    test_data = data[dataset.test_mask]
+    print('Train: N=%d, %d days; Val: N=%d, %d days; Test: N=%d, %d days' % 
+          (len(train_data), len(train_data.t.unique()), len(val_data), len(val_data.t.unique()),
+           len(test_data), len(test_data.t.unique()))
+    )
+        
+    train_loader = TemporalDataLoader(train_data, batch_size=args.bs)
+    val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
+    test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
+    return train_loader, val_loader, test_loader
     
 def run_experiment(args):
     """
@@ -452,11 +477,9 @@ def run_experiment(args):
     metric = dataset.eval_metric
     neg_sampler = dataset.negative_sampler
     evaluator = Evaluator(name=args.dataset)
-    # split into train/val/test
     data = dataset.get_TemporalData().to(device)
-    train_loader = TemporalDataLoader(data[dataset.train_mask], batch_size=args.bs)
-    val_loader = TemporalDataLoader(data[dataset.val_mask], batch_size=args.bs)
-    test_loader = TemporalDataLoader(data[dataset.test_mask], batch_size=args.bs)
+    # split into train/val/test
+    train_loader, val_loader, test_loader = split_data(args, data, dataset)
     
     # Initialize model
     model, opt = set_up_model(args, data, device)
