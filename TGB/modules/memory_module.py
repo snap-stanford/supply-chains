@@ -776,6 +776,7 @@ class StaticMemory(torch.nn.Module):
         super().__init__()
         self.num_nodes = num_nodes
         self.memory_dim = memory_dim
+        # default init: from N(0, 1)
         self.memory = Embedding(self.num_nodes, self.memory_dim)
         self.time_enc = TimeEncoder(time_dim)
         self.register_buffer("last_update", torch.empty(self.num_nodes, dtype=torch.long))
