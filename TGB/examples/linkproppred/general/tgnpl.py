@@ -24,7 +24,7 @@ from torch_geometric.nn import TransformerConv
 from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
 from modules.decoder import LinkPredictorTGNPL
-from modules.emb_module import GraphAttentionEmbedding
+from modules.emb_module import *
 from modules.msg_func import TGNPLMessage
 from modules.msg_agg import MeanAggregator
 from modules.neighbor_loader import LastNeighborLoaderTGNPL
@@ -301,12 +301,14 @@ def get_tgnpl_args():
     parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
     parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
+    parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
     parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory in TGNPL memory', default=False)
     parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating TGNPL memory inventory loss', default=0)
     parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating TGNPL memory inventory loss', default=0)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
     parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
+    parser.add_argument('--train_on_val', type=bool, default=False, help='If true, train on validation set with fixed negative sampled; used for debugging')
     
     try:
         args = parser.parse_args()
@@ -381,12 +383,21 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         memory = StaticMemory(num_nodes = num_nodes, memory_dim = args.mem_dim, time_dim = args.time_dim).to(device)
 
     # initialize GNN
-    gnn = GraphAttentionEmbedding(
-        in_channels=mem_out,
-        out_channels=args.emb_dim,
-        msg_dim=data.msg.size(-1),
-        time_enc=memory.time_enc,
-    ).to(device)
+    if args.emb_name == 'attn':
+        gnn = GraphAttentionEmbedding(
+            in_channels=mem_out,
+            out_channels=args.emb_dim,
+            msg_dim=data.msg.size(-1),
+            time_enc=memory.time_enc,
+        ).to(device)
+    elif args.emb_name == 'sum':
+        gnn = GraphSumEmbedding(
+            in_channels=mem_out,
+            out_channels=args.emb_dim
+        ).to(device)
+    else:
+        assert args.memory_name == 'id'
+        gnn = IdentityEmbedding().to(device)
 
     # initialize decoder
     link_pred = LinkPredictorTGNPL(in_channels=args.emb_dim).to(device)
@@ -421,8 +432,14 @@ def split_data(args, data, dataset):
     )
         
     train_loader = TemporalDataLoader(train_data, batch_size=args.bs)
-    val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
-    test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
+    if args.emb_name == 'id':
+        # we can use larger batch size since embedding is just memory; not affected by temporal graph
+        val_loader = TemporalDataLoader(val_data, batch_size=len(val_data))
+        test_loader = TemporalDataLoader(test_data, batch_size=len(test_data))
+    else:
+        # need to use the same batch size, since that affects how the temporal graph is updated
+        val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
+        test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
     return train_loader, val_loader, test_loader
     
 def run_experiment(args):
@@ -480,6 +497,8 @@ def run_experiment(args):
     data = dataset.get_TemporalData().to(device)
     # split into train/val/test
     train_loader, val_loader, test_loader = split_data(args, data, dataset)
+    if args.train_on_val:
+        print('Warning: ignoring train set, training on validation set and its fixed negative samples')
     
     # Initialize model
     model, opt = set_up_model(args, data, device)
@@ -516,7 +535,16 @@ def run_experiment(args):
         start_train_val = timeit.default_timer()
         for epoch in range(1, args.num_epoch + 1):
             start_epoch_train = timeit.default_timer()
-            loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, train_loader, device)
+            if args.train_on_val:
+                # used for debugging: train on validation, with fixed negative samples
+                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
+                                                    neg_sampler=neg_sampler, split_mode="val")
+                # Reset memory and graph for beginning of val
+                model['memory'].reset_state()  
+                neighbor_loader.reset_state()
+            else:
+                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, train_loader, device)
+                # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             print(
                 f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
