@@ -36,12 +36,12 @@ class GraphAttentionEmbedding(torch.nn.Module):
         self.time_enc = time_enc
         edge_dim = msg_dim + time_enc.out_channels
         self.conv1 = TransformerConv(
-            in_channels, out_channels // 2, heads=2, dropout=0.1, edge_dim=edge_dim
+            in_channels, out_channels // 2, heads=2, dropout=0.5, edge_dim=edge_dim
         )
         self.bns = BatchNorm1d(out_channels)
         self.relu = ReLU()
         self.conv2 = TransformerConv(
-            out_channels, out_channels // 2, heads=2, dropout=0.1, edge_dim=edge_dim
+            out_channels, out_channels // 2, heads=2, dropout=0.5, edge_dim=edge_dim
         )
 
     def forward(self, x, last_update, edge_index, t, msg):
