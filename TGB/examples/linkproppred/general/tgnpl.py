@@ -396,7 +396,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
             out_channels=args.emb_dim
         ).to(device)
     else:
-        assert args.memory_name == 'id'
+        assert args.emb_name == 'id'
         gnn = IdentityEmbedding().to(device)
 
     # initialize decoder
