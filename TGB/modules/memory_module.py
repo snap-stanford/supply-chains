@@ -93,8 +93,9 @@ class TGNPLMemory(torch.nn.Module):
                 self.prod_bilinear = Parameter(torch.ones(size=(self.state_dim, self.state_dim), requires_grad=True))
         else:
             self.memory_dim = self.state_dim
-        self.register_buffer("memory", torch.empty(self.num_nodes, self.memory_dim))
-        self.register_buffer("last_update", torch.empty(self.num_nodes, dtype=torch.long))
+        self.init_memory = Embedding(self.num_nodes, self.state_dim)  # initial memory
+        self.register_buffer("memory", torch.empty(self.num_nodes, self.memory_dim))  # current memory
+        self.register_buffer("last_update", torch.ones(self.num_nodes, dtype=torch.long).to(self.device) * -1)  # -1 represents no update yet
         self.register_buffer("_assoc", torch.empty(self.num_nodes, dtype=torch.long))            
 
         self.msg_s_store = {}
@@ -117,13 +118,14 @@ class TGNPLMemory(torch.nn.Module):
         if hasattr(self.aggr_module, "reset_parameters"):
             self.aggr_module.reset_parameters()
         self.time_enc.reset_parameters()
+        self.init_memory.reset_parameters()
         self.state_updater.reset_parameters()
         self.reset_state()
 
     def reset_state(self):
         """Resets the memory to its initial state."""
         zeros(self.memory)
-        zeros(self.last_update)
+        self.last_update = torch.ones(self.num_nodes, dtype=torch.long).to(self.device) * -1  # -1 represents no update yet
         self._reset_message_store()
 
     def _reset_message_store(self):
@@ -196,6 +198,9 @@ class TGNPLMemory(torch.nn.Module):
         """
         self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)  # used to reindex n_id from 0
         state, inventory = self.memory[n_id, :self.state_dim], self.memory[n_id, self.state_dim:]
+        last_update = self.last_update[n_id]
+        use_init = last_update == -1  # if this node has never been updated, use initial memory
+        state[use_init] = self.init_memory(n_id[use_init])
         
         # Compute messages to suppliers in interactions where n_id is supplier
         msg_s, t_s, idx_s, _, _ = self._compute_msg(
@@ -226,13 +231,14 @@ class TGNPLMemory(torch.nn.Module):
         if self.debug:
             print('aggr', aggr)
         
-        # Get local copy of updated state
-        #print("memory-module", aggr.shape, state.shape)
-        state = self.state_updater(aggr, state)
-            
-        # Get local copy of updated `last_update`.
-        dim_size = self.last_update.size(0)
-        last_update = scatter(t, idx, 0, dim_size, reduce="max")[n_id]
+        # If this node has a new messages, update its state and last update
+        has_new_messages = torch.isin(n_id, idx)
+        # Get updated state
+        new_state = self.state_updater(aggr, state.clone())
+        state[has_new_messages] = new_state[has_new_messages]
+        # Get updated last update
+        msg_update = scatter(t, idx, 0, self.num_nodes, reduce="max")[n_id]
+        last_update[has_new_messages] = msg_update[has_new_messages]
         
         # Get local copy of updated inventory
         if self.use_inventory:
@@ -249,7 +255,6 @@ class TGNPLMemory(torch.nn.Module):
         else:
             inv_loss = 0
 
-        #print("state = ",state.shape, "inventory = ", inventory.shape)
         memory = torch.cat([state, inventory], dim=1)
         if self.debug:
             print('memory', memory)
