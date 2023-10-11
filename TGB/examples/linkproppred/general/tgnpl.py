@@ -21,6 +21,7 @@ from torch_geometric.loader import TemporalDataLoader
 from torch_geometric.nn import TransformerConv
 
 # internal imports
+from tgb.linkproppred.logger import TensorboardLogger
 from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
 from modules.decoder import LinkPredictorTGNPL
