@@ -336,7 +336,8 @@ def get_unique_id_for_experiment(args):
     curr_time = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
     id_elements = [MODEL_NAME]
     for arg in vars(args):  # iterate over Namespace
-        id_elements.append(str(getattr(args, arg)))
+        if arg != 'weights':  # drop weight argument; otherwise, ID gets too long
+            id_elements.append(str(getattr(args, arg)))
     id_elements.append(curr_time)
     return '_'.join(id_elements)
 
@@ -432,14 +433,8 @@ def split_data(args, data, dataset):
     )
         
     train_loader = TemporalDataLoader(train_data, batch_size=args.bs)
-    if args.emb_name == 'id':
-        # we can use larger batch size since embedding is just memory; not affected by temporal graph
-        val_loader = TemporalDataLoader(val_data, batch_size=len(val_data))
-        test_loader = TemporalDataLoader(test_data, batch_size=len(test_data))
-    else:
-        # need to use the same batch size, since that affects how the temporal graph is updated
-        val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
-        test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
+    val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
+    test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
     return train_loader, val_loader, test_loader
     
 def run_experiment(args):
@@ -507,8 +502,18 @@ def run_experiment(args):
         model_path = os.path.join(save_model_dir, args.weights)
         assert os.path.isfile(model_path)
         saved_model = torch.load(model_path)
-        for module_name, module in model.items():
-            module.load_state_dict(saved_model[module_name])
+        try:
+            # try initializing for all modules
+            for module_name, module in model.items():
+                module.load_state_dict(saved_model[module_name])
+            print('Success: matched all model modules and loaded weights')
+        except:
+            if args.memory_name == 'tgnpl' and 'static' in args.weights:
+                # try initializing TGN-PL initial memory with static memory
+                model['memory'].init_memory.weight.data = saved_model['memory']['memory.weight'].to(device)
+                print('Success: initialized init_memory with static memory')
+            else:
+                raise Exception('Failed to initialize model with weights')
     
     # Initialize neighbor loader
     neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=NUM_NEIGHBORS, device=device)
