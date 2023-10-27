@@ -46,7 +46,9 @@ def get_positive_rank(train_frequency_dict, pos_edge, neg_edges, isBinary = Fals
     sorted_frequencies = sorted(frequencies, reverse = True)
 
     ranks = [idx + 1 for idx, freq in enumerate(sorted_frequencies) if freq == frequency_of_pos_edge]
-    return np.random.choice(ranks) 
+    return sum(ranks) / len(ranks)
+
+    #return np.random.choice(ranks) 
     
 if __name__ == "__main__":
     args = get_args()

@@ -73,7 +73,71 @@ def partition_edges(df, train_max_ts, val_max_ts, test_max_ts):
 
 def count_node_matches(edge1, edge2):
     return sum([edge1[j] == edge2[j] for j in range(len(edge1))])
-        
+
+""" simpler version 
+def edge_sampler_wrapper(split):
+    global edge_sampler 
+
+    E_eval = None
+    if (split == "train"):
+        E_eval = E_train.copy()
+    elif (split == "val"):
+        E_eval = E_val.copy()
+    else:
+        E_eval = E_test.copy()
+
+    def edge_sampler(key):
+        pos_s, pos_d, pos_p, ts = key
+        ts_eval_edges = [(source, destination, product) for source, destination, product in E_eval[ts]]
+        ts_eval_edges_set = set(ts_eval_edges)
+
+        hist, loose_hist = [], []
+        for hyperedge in E_train_edges:
+            if hyperedge in ts_eval_edges_set:
+                continue 
+            num_node_matches = count_node_matches((pos_s, pos_d, pos_p), hyperedge)
+            if (num_node_matches == 2): #hist negative
+                hist.append(hyperedge)
+            elif (num_node_matches == 1): #loose hist negative 
+                loose_hist.append(hyperedge)
+
+        #sample historical negatives -- aim to get num_samples // 2 in total
+        hist_sampled_idx = np.random.choice(range(len(hist)), size = min(num_samples // 2, len(hist)), replace = False)
+        hist_sampled = [hist[j] for j in hist_sampled_idx]
+
+        #use loose negatives if not enough historical negatives
+        if (len(hist_sampled) < num_samples // 2):
+            loose_hist_sampled_idx = np.random.choice(range(len(loose_hist)),
+                                    size = min(num_samples // 2 - len(hist_sampled), len(loose_hist)), replace = False)
+            loose_hist_sampled = [loose_hist[j] for j in loose_hist_sampled_idx]
+            hist_sampled += loose_hist_sampled 
+    
+        # sample random negatives 
+        hist_deficit = num_samples // 2 - len(hist_sampled)
+        random_surplus = [0,0,0]
+        for _ in range(hist_deficit):
+            random_surplus[int(3 * np.random.rand())] += 1
+    
+        #ensure the random negatives aren't historical 
+        rand_s = [s for s in L_firm if (s, pos_d, pos_p) not in ts_eval_edges_set and (s, pos_d, pos_p) not in E_train_edges]
+        rand_d = [d for d in L_firm if (pos_s, d, pos_p) not in ts_eval_edges_set and (pos_s, d, pos_p) not in E_train_edges]
+        rand_p = [p for p in L_products if (pos_s, pos_d, p) not in ts_eval_edges_set and (pos_s, pos_d, p) not in E_train_edges]
+    
+        #sample num_samples // 6 of each perturbation class, plus extras if there is a deficit of historical negatives
+        rand_s_sampled = np.random.choice(rand_s, size = num_samples // 6 + random_surplus[0], replace = False)
+        rand_d_sampled = np.random.choice(rand_d, size = num_samples // 6 + random_surplus[1], replace = False)
+        rand_p_sampled = np.random.choice(rand_p, size = num_samples // 6 + random_surplus[2], replace = False)
+        rand_s_sampled = [(s,pos_d,pos_p) for s in rand_s_sampled]
+        rand_d_sampled = [(pos_s,d,pos_p) for d in rand_d_sampled]
+        rand_p_sampled = [(pos_s, pos_d, p) for p in rand_p_sampled]
+        rand_sampled = rand_s_sampled + rand_d_sampled + rand_p_sampled 
+                              
+        all_negative_samples = hist_sampled + rand_sampled
+        return all_negative_samples
+            
+    return edge_sampler
+"""
+
 def edge_sampler_wrapper(split): #returns an edge sampler function for either the train, val, or test split 
     global edge_sampler
 
@@ -139,9 +203,9 @@ def edge_sampler_wrapper(split): #returns an edge sampler function for either th
     
         #ensure the random negatives aren't historical 
         hist_edge_lexicon = ts_eval_edges_set.union(E_train_edges)
-        rand_s = [s for s in L_firm if (s, pos_d, pos_p) not in hist_edge_lexicon]
-        rand_d = [d for d in L_firm if (pos_s, d, pos_p) not in hist_edge_lexicon]
-        rand_p = [p for p in L_products if (pos_s, pos_d, p) not in hist_edge_lexicon]
+        rand_s = [s for s in L_firm if (s, pos_d, pos_p) not in ts_eval_edges_set and (s, pos_d, pos_p) not in E_train_edges]
+        rand_d = [d for d in L_firm if (pos_s, d, pos_p) not in hist_edge_lexicon and (pos_s, d, pos_p) not in E_train_edges]
+        rand_p = [p for p in L_products if (pos_s, pos_d, p) not in hist_edge_lexicon and (pos_s, pos_d, p) not in E_train_edges]
     
         #sample num_samples // 6 of each perturbation class, plus extras if there is a deficit of historical negatives
         rand_s_sampled = np.random.choice(rand_s, size = num_samples // 6 + random_surplus[0], replace = False)
