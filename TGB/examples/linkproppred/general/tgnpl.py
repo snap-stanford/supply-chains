@@ -116,7 +116,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     assoc[n_id] = torch.arange(n_id.size(0), device=device)
 
     # Get updated memory of all nodes involved in the computation.
-    memory, last_update, inv_loss = model['memory'](n_id)
+    memory, last_update, inv_loss, update_loss = model['memory'](n_id)
     z = model['gnn'](
         memory,
         last_update,
@@ -127,7 +127,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
 
     y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
     y_pred = y_pred.reshape(bs, num_samples)
-    return y_pred
+    return y_pred, inv_loss, update_loss
     
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
@@ -173,16 +173,15 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         # sigmoid then binary cross entropy, used in TGB
         criterion = torch.nn.BCEWithLogitsLoss()
     
-    total_loss, total_logits_loss, total_inv_loss, total_num_events = 0, 0, 0, 0
+    total_loss, total_logits_loss, total_inv_loss, total_update_loss, total_num_events = 0, 0, 0, 0, 0
     for batch in tqdm(data_loader):        
         batch = batch.to(device)
         if update_params:
             optimizer.zero_grad()
 
-        y_pred = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_pred, inv_loss, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products)
-        
         if loss_name == 'ce-softmax':
             target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
             logits_loss = criterion(y_pred, target)
@@ -194,11 +193,11 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             logits_loss = criterion(pos_out, torch.ones_like(pos_out))
             logits_loss += criterion(neg_out, torch.zeros_like(neg_out))
         
-        inv_loss = 0  # TODO
-        loss = logits_loss + inv_loss
+        loss = logits_loss + inv_loss + update_loss
         total_loss += float(loss) * batch.num_events  # scale by batch size
         total_logits_loss += float(logits_loss) * batch.num_events
         total_inv_loss += float(inv_loss) * batch.num_events
+        total_update_loss += float(update_loss) * batch.num_events
         total_num_events += batch.num_events
         
         # Update memory and neighbor loader with ground-truth state.
@@ -211,7 +210,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             optimizer.step()
             model['memory'].detach()
 
-    return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events
+    return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events, total_update_loss / total_num_events
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
@@ -246,7 +245,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     batch_size = []
     
     for batch in tqdm(data_loader):
-        y_pred = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_pred, _, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products)
         input_dict = {
@@ -427,7 +426,6 @@ def set_up_data(args, data, dataset):
     mean = torch.mean(log_msg)
     std = torch.std(log_msg)
     data.msg = (log_msg - mean) / std  # standard scaling
-    print('Converted amount to log-scale and applied standard scaling: mean = %.2f' % torch.mean(data.msg))
     
     if args.num_train_days == -1:
         train_data = data[dataset.train_mask]
@@ -503,6 +501,7 @@ def run_experiment(args):
     evaluator = Evaluator(name=args.dataset)
     data = dataset.get_TemporalData().to(device)
     train_loader, val_loader, test_loader = set_up_data(args, data, dataset)
+    print('Converted amount to log-scale and applied standard scaling: mean = %.2f' % torch.mean(data.msg))
     if args.train_on_val:
         print('Warning: ignoring train set, training on validation set and its fixed negative samples')
     
@@ -553,17 +552,17 @@ def run_experiment(args):
             start_epoch_train = timeit.default_timer()
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
-                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
+                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
                                                     neg_sampler=neg_sampler, split_mode="val")
                 # Reset memory and graph for beginning of val
                 model['memory'].reset_state()  
                 neighbor_loader.reset_state()
             else:
-                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, train_loader, device)
+                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, train_loader, device)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             print(
-                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
+                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Update_Loss: {update_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
             )
             train_loss_list.append(float(loss))
 
