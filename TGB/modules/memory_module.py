@@ -52,6 +52,7 @@ class TGNPLMemory(torch.nn.Module):
         learn_att_direct: bool = False,
         debt_penalty: float = 0,
         consumption_reward: float = 0,
+        update_penalty: float = 1.,
         debug: bool = False,
     ):
         super().__init__()
@@ -71,6 +72,7 @@ class TGNPLMemory(torch.nn.Module):
         self.learn_att_direct = learn_att_direct
         self.debt_penalty = debt_penalty
         self.consumption_reward = consumption_reward
+        self.update_penalty = update_penalty
         self.debug = debug
         
         if state_updater_cell == "gru":  # for TGN
@@ -144,11 +146,11 @@ class TGNPLMemory(torch.nn.Module):
         """Returns, for all nodes :obj:`n_id`, their current memory and their
         last updated timestamp."""
         if self.training:
-            memory, last_update, inv_loss = self._get_updated_memory(n_id)
+            memory, last_update, inv_loss, update_loss = self._get_updated_memory(n_id)
         else:
-            memory, last_update, inv_loss = self.memory[n_id], self.last_update[n_id], 0
+            memory, last_update, inv_loss, update_loss = self.memory[n_id], self.last_update[n_id], 0, 0
 
-        return memory, last_update, inv_loss
+        return memory, last_update, inv_loss, update_loss
     
     def update_state(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, raw_msg: Tensor):
         """Updates the memory with newly encountered interactions
@@ -187,7 +189,7 @@ class TGNPLMemory(torch.nn.Module):
         """
         Update the stored memory and last update for nodes in n_id.
         """
-        memory, last_update, inv_loss = self._get_updated_memory(n_id)
+        memory, last_update, inv_loss, update_loss = self._get_updated_memory(n_id)
         self.memory[n_id] = memory
         self.last_update[n_id] = last_update
 
@@ -235,6 +237,11 @@ class TGNPLMemory(torch.nn.Module):
         has_new_messages = torch.isin(n_id, idx)
         # Get updated state
         new_state = self.state_updater(aggr, state.clone())
+        if has_new_messages.sum() > 0:
+            delta = torch.linalg.vector_norm(new_state[has_new_messages] - state[has_new_messages])  # norm change in state
+            update_loss = self.update_penalty * delta / has_new_messages.sum()
+        else:
+            update_loss = 0  # set to 0 so we don't get nan
         state[has_new_messages] = new_state[has_new_messages]
         # Get updated last update
         msg_update = scatter(t, idx, 0, self.num_nodes, reduce="max")[n_id]
@@ -258,7 +265,7 @@ class TGNPLMemory(torch.nn.Module):
         memory = torch.cat([state, inventory], dim=1)
         if self.debug:
             print('memory', memory)
-        return memory, last_update, inv_loss
+        return memory, last_update, inv_loss, update_loss
     
     def _compute_internal_consumption(self, n_id: Tensor, prod_emb: Tensor = None):
         """
