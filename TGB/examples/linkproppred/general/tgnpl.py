@@ -414,10 +414,21 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     )
     return model, optimizer
   
-def split_data(args, data, dataset):
+def set_up_data(args, data, dataset):
     """
-    Split data into train, val, test.
+    Normalize edge features; split data into train, val, test.
     """
+    # apply log scaling and standard scaling to edge features
+    msg = data.msg
+    min_val = torch.min(msg[msg > 0])
+    msg = torch.clip(msg, min_val, None)  # so that we don't take log of 0
+    assert (msg > 0).all()
+    log_msg = torch.log(msg)  # log scale
+    mean = torch.mean(log_msg)
+    std = torch.std(log_msg)
+    data.msg = (log_msg - mean) / std  # standard scaling
+    print('Converted amount to log-scale and applied standard scaling: mean = %.2f' % torch.mean(data.msg))
+    
     if args.num_train_days == -1:
         train_data = data[dataset.train_mask]
     else:
@@ -491,8 +502,7 @@ def run_experiment(args):
     neg_sampler = dataset.negative_sampler
     evaluator = Evaluator(name=args.dataset)
     data = dataset.get_TemporalData().to(device)
-    # split into train/val/test
-    train_loader, val_loader, test_loader = split_data(args, data, dataset)
+    train_loader, val_loader, test_loader = set_up_data(args, data, dataset)
     if args.train_on_val:
         print('Warning: ignoring train set, training on validation set and its fixed negative samples')
     
