@@ -33,6 +33,25 @@ def search_frequency(query, frequency_dict):
         return frequency_dict[query]
     return 0
 
+def count_node_matches(edge1, edge2):
+    return sum([edge1[j] == edge2[j] for j in range(len(edge1))])
+
+def get_hist_breakdown(train_edges_set, pos_edge, neg_edges): 
+    num_hist = 0
+    num_loose_hist = 0
+    num_rand = 0
+    for neg_edge in neg_edges: 
+        if (neg_edge in train_edges_set):
+            num_rand += 1
+            continue 
+        num_node_matches = count_node_matches(pos_edge, neg_edge)
+        if (num_node_matches == 2):
+            num_hist += 1
+        else:
+            num_loost_hist += 1
+
+    return num_hist, num_loose_hist, num_rand
+            
 #def get_prop_hist(train_frequency_dict, pos_edge, ):
 #    num_hist = len([dest for dest in negative_dest if (src, dest) in train_freq])
 #    return num_hist / len(negative_dest)
@@ -81,16 +100,22 @@ if __name__ == "__main__":
         else: 
             train_edge_frequency[(s,d,p)] = 1
 
-    val_ranks, val_hist = [], {ts: [] for ts in val_ts}
+    val_ranks, val_hist = [], {ts: {"hist": 0, "loose_hist": 0, "rand": 0} for ts in val_ts}
     for s, d, p, t in tqdm(val_ns): 
         negative_samples = [(s,d,p) for s,d,p in val_ns[(s,d,p,t)].astype(int)]
         rank = get_positive_rank(train_edge_frequency, (s,d,p), negative_samples, not args.use_freq)
+       # neg_sample_breakdown = get_hist_breakdown(set(train_edge_frequency.keys()), (s,d,p), negative_samples)
+       # for key in neg_sample_breakdown:
+       #     val_hist[t][key] += neg_sample_breakdown[key]
         val_ranks.append(rank) 
 
-    test_ranks, test_hist = [], {ts: [] for ts in val_ts}
+    test_ranks, test_hist = [], {ts: {"hist": 0, "loose_hist": 0, "rand": 0} for ts in val_ts}
     for s, d, p, t in tqdm(test_ns): 
         negative_samples = [(s,d,p) for s,d,p in test_ns[(s,d,p,t)].astype(int)]
         rank = get_positive_rank(train_edge_frequency, (s,d,p), negative_samples, not args.use_freq)
+       # neg_sample_breakdown = get_hist_breakdown(set(train_edge_frequency.keys()), (s,d,p), negative_samples)
+       # for key in neg_sample_breakdown:
+       #     test_hist[t][key] += neg_sample_breakdown[key]
         test_ranks.append(rank) 
 
     val_mean_MRR = calc_mean_MRR(val_ranks)

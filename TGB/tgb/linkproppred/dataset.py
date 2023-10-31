@@ -7,7 +7,7 @@ import zipfile
 import requests
 from clint.textui import progress
 
-from tgb.linkproppred.negative_sampler import NegativeEdgeSampler, NegativeHyperEdgeSampler
+from tgb.linkproppred.negative_sampler import NegativeEdgeSampler, NegativeHyperEdgeSampler, NegativeHyperEdgeSampler_V2
 from tgb.utils.info import PROJ_DIR, DATA_URL_DICT, DATA_EVAL_METRIC_DICT, BColors
 
 from tgb.utils.pre_process import (
@@ -29,6 +29,7 @@ class LinkPropPredDataset(object):
         root: Optional[str] = "datasets",
         meta_dict: Optional[dict] = None,
         preprocess: Optional[bool] = True,
+        use_prev_sampling = False,
     ):
         r"""Dataset class for link prediction dataset. Stores meta information about each dataset such as evaluation metrics etc.
         also automatically pre-processes the dataset.
@@ -98,8 +99,12 @@ class LinkPropPredDataset(object):
             self.pre_process(isHyperGraph = "tgbl-hypergraph" in self.name)
 
         #TODO: adjust the Negative Edge Sampler to work with the hypergraph data
-        if ("tgbl-hypergraph" in self.name):
+        if ("tgbl-hypergraph" in self.name and use_prev_sampling == True):
             self.ns_sampler = NegativeHyperEdgeSampler(
+                dataset_name=self.name, strategy="hist_rnd"
+            )
+        elif ("tgbl-hypergraph" in self.name):
+            self.ns_sampler = NegativeHyperEdgeSampler_V2(
                 dataset_name=self.name, strategy="hist_rnd"
             )
         else:
