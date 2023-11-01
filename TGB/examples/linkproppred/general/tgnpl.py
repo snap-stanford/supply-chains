@@ -5,6 +5,7 @@ from tqdm import tqdm
 import json
 import argparse 
 import sys
+from torch.utils.tensorboard import SummaryWriter
 
 import os
 import os.path as osp
@@ -299,6 +300,7 @@ def get_tgnpl_args():
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1, choices=[1])
     parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
+    parser.add_argument('--tensorboard', type=bool, help='Tensorboard support', default=False)
     parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
     parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
@@ -459,6 +461,10 @@ def run_experiment(args):
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     print('Device:', device)
 
+    # start tensorboard to track this script
+    if args.tensorboard:
+        writer = SummaryWriter(comment=exp_id)
+    
     # start a new wandb run to track this script
     if args.wandb:
         wandb.init(
@@ -575,14 +581,25 @@ def run_experiment(args):
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
             val_perf_list.append(perf_metric_val)
 
+            # log metrics to tensorboard
+            if args.tensorboard:
+                writer.add_scalar("loss", loss, epoch)
+                writer.add_scalar("logits_loss", logits_loss, epoch)
+                writer.add_scalar("inv_loss", inv_loss, epoch)
+                writer.add_scalar("update_loss", update_loss, epoch)
+                writer.add_scalar("perf_metric_val", perf_metric_val, epoch)
+                writer.add_scalar("elapsed_time_train", time_train, epoch)
+                writer.add_scalar("elapsed_time_val", time_val, epoch)
+            
             # log metric to wandb
             if args.wandb:
                 wandb.log({"loss": loss, 
                            "logits_loss": logits_loss,
                            "inv_loss": inv_loss,
+                           "update_loss": update_loss,
                            "perf_metric_val": perf_metric_val, 
-                           "elapsed_time_train": TIME_TRAIN, 
-                           "elapsed_time_val": TIME_VAL
+                           "elapsed_time_train": time_train, 
+                           "elapsed_time_val": time_val
                            })
             # save train+val results after each epoch
             save_results({'model': MODEL_NAME,
@@ -619,6 +636,18 @@ def run_experiment(args):
         print(f"\tTest: {metric}: {perf_metric_test: .4f}")
         test_time = timeit.default_timer() - start_test
         print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
+        if args.tensorboard:
+            hparam_dict = vars(args)
+            hparam_dict.update({"num_neighbors": NUM_NEIGHBORS,
+                                "model_name": MODEL_NAME, 
+                                "metric": metric})
+            metric_dict = {
+                "best_epoch": early_stopper.best_epoch,
+                "perf_metric_test": perf_metric_test
+            }
+            writer.add_hparams(hparam_dict, metric_dict)
+            writer.add_scalar("elapsed_time_test", test_time)
+            
         if args.wandb:
             wandb.summary["metric"] = metric
             wandb.summary["best_epoch"] = early_stopper.best_epoch
@@ -642,6 +671,8 @@ def run_experiment(args):
 
     print(f"Overall Elapsed Time (s): {timeit.default_timer() - start_overall: .4f}")
     print("==============================================================")
+    if args.tensorboard:
+        writer.close()
     if args.wandb:
         wandb.finish()
         
