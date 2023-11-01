@@ -812,7 +812,7 @@ class StaticMemory(torch.nn.Module):
     def forward(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Returns, for all nodes :obj:`n_id`, their current memory and their
         last updated timestamp."""
-        return self.memory(n_id), self.last_update[n_id], 0
+        return self.memory(n_id), self.last_update[n_id], 0, 0
     
     def update_state(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, raw_msg: Tensor):
         """Updates the memory with newly encountered interactions.
