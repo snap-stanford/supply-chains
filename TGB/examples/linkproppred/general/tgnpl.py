@@ -307,6 +307,7 @@ def get_tgnpl_args():
     parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory in TGNPL memory', default=False)
     parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating TGNPL memory inventory loss', default=0)
     parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating TGNPL memory inventory loss', default=0)
+    parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
     parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
@@ -379,6 +380,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
             aggregator_module=MeanAggregator(),
             debt_penalty=args.debt_penalty,
             consumption_reward=args.consum_rwd,
+            update_penalty=args.update_penalty,
         ).to(device)
     else:
         assert args.memory_name == 'static'
