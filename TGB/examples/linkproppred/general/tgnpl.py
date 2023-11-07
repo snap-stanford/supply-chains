@@ -403,7 +403,8 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         gnn = IdentityEmbedding().to(device)
 
     # initialize decoder
-    link_pred = LinkPredictorTGNPL(in_channels=args.emb_dim).to(device)
+    link_emb = mem_out if args.emb_name == 'id' else args.emb_dim
+    link_pred = LinkPredictorTGNPL(in_channels=link_emb).to(device)
 
     # put together in model and initialize optimizer
     model = {'memory': memory,
