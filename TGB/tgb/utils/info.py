@@ -46,6 +46,7 @@ DATA_EVAL_METRIC_DICT = {
     "tgbn-reddit": "ndcg",
     "tgbl-supplychains": "mrr",
     "tgbl-hypergraph": "mrr",
+    "tgbl-sync": "mrr",
     "tgbn-hypergraph": "ndcg",
     "tgbn-supplychains": "ndcg",
 }

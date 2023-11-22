@@ -7,7 +7,7 @@ import zipfile
 import requests
 from clint.textui import progress
 
-from tgb.linkproppred.negative_sampler import NegativeEdgeSampler, NegativeHyperEdgeSampler
+from tgb.linkproppred.negative_sampler import NegativeEdgeSampler, NegativeHyperEdgeSampler, NegativeHyperEdgeSampler_V2
 from tgb.utils.info import PROJ_DIR, DATA_URL_DICT, DATA_EVAL_METRIC_DICT, BColors
 
 from tgb.utils.pre_process import (
@@ -50,7 +50,7 @@ class LinkPropPredDataset(object):
         # check if the evaluatioin metric are specified
         if self.name in DATA_EVAL_METRIC_DICT:
             self.metric = DATA_EVAL_METRIC_DICT[self.name]
-        elif "tgbl-supplychains" in self.name or "tgbl-hypergraph" in self.name:
+        elif "tgbl-supplychains" in self.name or "tgbl-hypergraph" in self.name or "tgbl-sync" in self.name:
             self.metric = "mrr"
         else:
             self.metric = None
@@ -84,7 +84,7 @@ class LinkPropPredDataset(object):
         self._val_data = None
         self._test_data = None
 
-        if ("tgbl-supplychains" not in self.name or "tgbl-hypergraph" not in self.name):
+        if ("tgbl-supplychains" not in self.name or "tgbl-hypergraph" not in self.name or "tgbl-sync" not in self.name):
             self.download()
         
         # check if the root directory exists, if not create it
@@ -95,11 +95,11 @@ class LinkPropPredDataset(object):
             raise FileNotFoundError(f"Directory not found at {self.root}")
 
         if preprocess:
-            self.pre_process(isHyperGraph = "tgbl-hypergraph" in self.name)
+            self.pre_process(isHyperGraph = self.name in ['tgbl-hypergraph','tgbl-sync'])
 
         #TODO: adjust the Negative Edge Sampler to work with the hypergraph data
-        if ("tgbl-hypergraph" in self.name):
-            self.ns_sampler = NegativeHyperEdgeSampler(
+        if ("tgbl-sync" or "tgbl-hypergraph" in self.name):
+            self.ns_sampler = NegativeHyperEdgeSampler_V2(
                 dataset_name=self.name, strategy="hist_rnd"
             )
         else:
@@ -200,6 +200,8 @@ class LinkPropPredDataset(object):
                 print(self.meta_dict["fname"])
                 df, edge_feat, node_ids = csv_to_pd_data_hitachi(self.meta_dict["fname"])
             elif "tgbl-hypergraph" in self.name:
+                df, edge_feat, node_ids = convert_hypergraph(self.meta_dict["fname"])
+            elif "tgbl-sync" in self.name:
                 df, edge_feat, node_ids = convert_hypergraph(self.meta_dict["fname"])
 
             save_pkl(edge_feat, OUT_EDGE_FEAT)
