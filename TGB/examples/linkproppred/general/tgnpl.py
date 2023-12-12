@@ -5,6 +5,7 @@ from tqdm import tqdm
 import json
 import argparse 
 import sys
+from torch.utils.tensorboard import SummaryWriter
 
 import os
 import os.path as osp
@@ -133,7 +134,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     assoc[n_id] = torch.arange(n_id.size(0), device=device)
 
     # Get updated memory of all nodes involved in the computation.
-    memory, last_update, inv_loss = model['memory'](n_id)
+    memory, last_update, inv_loss, update_loss = model['memory'](n_id)
     z = model['gnn'](
         memory,
         last_update,
@@ -144,7 +145,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
 
     y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
     y_pred = y_pred.reshape(bs, num_samples)
-    return y_pred
+    return y_pred, inv_loss, update_loss
     
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
@@ -192,16 +193,16 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         # sigmoid then binary cross entropy, used in TGB
         criterion = torch.nn.BCEWithLogitsLoss()
     
-    total_loss, total_logits_loss, total_inv_loss, total_num_events = 0, 0, 0, 0
+    total_loss, total_logits_loss, total_inv_loss, total_update_loss, total_num_events = 0, 0, 0, 0, 0
     for batch in tqdm(data_loader):        
         batch = batch.to(device)
         if update_params:
             optimizer.zero_grad()
 
-        y_pred = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_pred, inv_loss, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products, use_prev_sampling = use_prev_sampling)
-        
+      
         if loss_name == 'ce-softmax':
             target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
             logits_loss = criterion(y_pred, target)
@@ -213,11 +214,11 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             logits_loss = criterion(pos_out, torch.ones_like(pos_out))
             logits_loss += criterion(neg_out, torch.zeros_like(neg_out))
         
-        inv_loss = 0  # TODO
-        loss = logits_loss + inv_loss
+        loss = logits_loss + inv_loss + update_loss
         total_loss += float(loss) * batch.num_events  # scale by batch size
         total_logits_loss += float(logits_loss) * batch.num_events
         total_inv_loss += float(inv_loss) * batch.num_events
+        total_update_loss += float(update_loss) * batch.num_events
         total_num_events += batch.num_events
         
         # Update memory and neighbor loader with ground-truth state.
@@ -230,7 +231,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             optimizer.step()
             model['memory'].detach()
 
-    return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events
+    return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events, total_update_loss / total_num_events
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
@@ -267,7 +268,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     batch_size = []
     
     for batch in tqdm(data_loader):
-        y_pred = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_pred, _, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products,
                                        use_prev_sampling = use_prev_sampling)
@@ -322,12 +323,14 @@ def get_tgnpl_args():
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1, choices=[1])
     parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
+    parser.add_argument('--tensorboard', type=bool, help='Tensorboard support', default=False)
     parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
     parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
     parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory in TGNPL memory', default=False)
     parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating TGNPL memory inventory loss', default=0)
     parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating TGNPL memory inventory loss', default=0)
+    parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
     parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
@@ -403,6 +406,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
             aggregator_module=MeanAggregator(),
             debt_penalty=args.debt_penalty,
             consumption_reward=args.consum_rwd,
+            update_penalty=args.update_penalty,
         ).to(device)
     else:
         assert args.memory_name == 'static'
@@ -427,7 +431,8 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         gnn = IdentityEmbedding().to(device)
 
     # initialize decoder
-    link_pred = LinkPredictorTGNPL(in_channels=args.emb_dim).to(device)
+    link_emb = mem_out if args.emb_name == 'id' else args.emb_dim
+    link_pred = LinkPredictorTGNPL(in_channels=link_emb).to(device)
 
     # put together in model and initialize optimizer
     model = {'memory': memory,
@@ -439,10 +444,20 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     )
     return model, optimizer
   
-def split_data(args, data, dataset):
+def set_up_data(args, data, dataset):
     """
-    Split data into train, val, test.
+    Normalize edge features; split data into train, val, test.
     """
+    # apply log scaling and standard scaling to edge features
+    msg = data.msg
+    min_val = torch.min(msg[msg > 0])
+    msg = torch.clip(msg, min_val, None)  # so that we don't take log of 0
+    assert (msg > 0).all()
+    log_msg = torch.log(msg)  # log scale
+    mean = torch.mean(log_msg)
+    std = torch.std(log_msg)
+    data.msg = (log_msg - mean) / std  # standard scaling
+    
     if args.num_train_days == -1:
         train_data = data[dataset.train_mask]
     else:
@@ -475,6 +490,10 @@ def run_experiment(args):
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     print('Device:', device)
 
+    # start tensorboard to track this script
+    if args.tensorboard:
+        writer = SummaryWriter(comment=exp_id)
+    
     # start a new wandb run to track this script
     if args.wandb:
         wandb.init(
@@ -517,8 +536,8 @@ def run_experiment(args):
     neg_sampler = dataset.negative_sampler
     evaluator = Evaluator(name=args.dataset)
     data = dataset.get_TemporalData().to(device)
-    # split into train/val/test
-    train_loader, val_loader, test_loader = split_data(args, data, dataset)
+    train_loader, val_loader, test_loader = set_up_data(args, data, dataset)
+    print('Converted amount to log-scale and applied standard scaling: mean = %.2f' % torch.mean(data.msg))
     if args.train_on_val:
         print('Warning: ignoring train set, training on validation set and its fixed negative samples')
     
@@ -569,6 +588,7 @@ def run_experiment(args):
             start_epoch_train = timeit.default_timer()
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
+
                 loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
                                                     neg_sampler=neg_sampler, split_mode="val", 
                                                     use_prev_sampling = args.use_prev_sampling)
@@ -576,12 +596,13 @@ def run_experiment(args):
                 model['memory'].reset_state()  
                 neighbor_loader.reset_state()
             else:
+              
                 loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, train_loader, device,
                                                     use_prev_sampling = args.use_prev_sampling)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             print(
-                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
+                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Update_Loss: {update_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
             )
             train_loss_list.append(float(loss))
 
@@ -594,14 +615,25 @@ def run_experiment(args):
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
             val_perf_list.append(perf_metric_val)
 
+            # log metrics to tensorboard
+            if args.tensorboard:
+                writer.add_scalar("loss", loss, epoch)
+                writer.add_scalar("logits_loss", logits_loss, epoch)
+                writer.add_scalar("inv_loss", inv_loss, epoch)
+                writer.add_scalar("update_loss", update_loss, epoch)
+                writer.add_scalar("perf_metric_val", perf_metric_val, epoch)
+                writer.add_scalar("elapsed_time_train", time_train, epoch)
+                writer.add_scalar("elapsed_time_val", time_val, epoch)
+            
             # log metric to wandb
             if args.wandb:
                 wandb.log({"loss": loss, 
                            "logits_loss": logits_loss,
                            "inv_loss": inv_loss,
+                           "update_loss": update_loss,
                            "perf_metric_val": perf_metric_val, 
-                           "elapsed_time_train": TIME_TRAIN, 
-                           "elapsed_time_val": TIME_VAL
+                           "elapsed_time_train": time_train, 
+                           "elapsed_time_val": time_val
                            })
             # save train+val results after each epoch
             save_results({'model': MODEL_NAME,
@@ -638,6 +670,18 @@ def run_experiment(args):
         print(f"\tTest: {metric}: {perf_metric_test: .4f}")
         test_time = timeit.default_timer() - start_test
         print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
+        if args.tensorboard:
+            hparam_dict = vars(args)
+            hparam_dict.update({"num_neighbors": NUM_NEIGHBORS,
+                                "model_name": MODEL_NAME, 
+                                "metric": metric})
+            metric_dict = {
+                "best_epoch": early_stopper.best_epoch,
+                "perf_metric_test": perf_metric_test
+            }
+            writer.add_hparams(hparam_dict, metric_dict)
+            writer.add_scalar("elapsed_time_test", test_time)
+            
         if args.wandb:
             wandb.summary["metric"] = metric
             wandb.summary["best_epoch"] = early_stopper.best_epoch
@@ -661,6 +705,8 @@ def run_experiment(args):
 
     print(f"Overall Elapsed Time (s): {timeit.default_timer() - start_overall: .4f}")
     print("==============================================================")
+    if args.tensorboard:
+        writer.close()
     if args.wandb:
         wandb.finish()
         
