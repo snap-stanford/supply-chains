@@ -29,6 +29,7 @@ class LinkPropPredDataset(object):
         root: Optional[str] = "datasets",
         meta_dict: Optional[dict] = None,
         preprocess: Optional[bool] = True,
+        use_prev_sampling = False,
     ):
         r"""Dataset class for link prediction dataset. Stores meta information about each dataset such as evaluation metrics etc.
         also automatically pre-processes the dataset.
@@ -98,7 +99,12 @@ class LinkPropPredDataset(object):
             self.pre_process(isHyperGraph = self.name in ['tgbl-hypergraph','tgbl-sync'])
 
         #TODO: adjust the Negative Edge Sampler to work with the hypergraph data
-        if ("tgbl-sync" or "tgbl-hypergraph" in self.name):
+        if ("tgbl-hypergraph" in self.name and use_prev_sampling == True):
+            #backward compatibility with the original method for negative hyper-edge sampling
+            self.ns_sampler = NegativeHyperEdgeSampler(
+                dataset_name=self.name, strategy="hist_rnd"
+            )
+        elif ("tgbl-hypergraph" in self.name or "tgbl-sync" in self.name):
             self.ns_sampler = NegativeHyperEdgeSampler_V2(
                 dataset_name=self.name, strategy="hist_rnd"
             )

@@ -39,7 +39,7 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPred
 # ===========================================
 def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                           ns_samples=6, neg_sampler=None, split_mode="val",
-                          num_firms=None, num_products=None):
+                          num_firms=None, num_products=None, use_prev_sampling = False):
     """
     Get model scores for a batch's positive edges and its corresponding negative samples.
     If neg_sampler is None, sample negative samples at random.
@@ -54,6 +54,8 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         split_mode: in ['val', 'test'], used for neg_sampler
         num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
+        use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
+                            (that is, without correction to the loose negatives on Oct 24)
     Returns:
         y_pred: shape is (batch size) x (1 + 3*ns_samples)
     """
@@ -92,8 +94,9 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
             dtype=torch.long,
             device=device,
         )
-    else:
-        # use fixed negatives
+
+    elif (use_prev_sampling == True):
+        #using the negative sampling procedure prior to Oct 24 (no loose negatives)
         neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
         assert len(neg_batch_list) == bs
         neg_batch_list = torch.Tensor(neg_batch_list)
@@ -102,13 +105,27 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         neg_prod = neg_batch_list[:, ns_samples:(2*ns_samples)]  
         neg_dst = neg_batch_list[:, (2*ns_samples):]  
         
-    num_samples = (3*ns_samples)+1  # total num samples per data point
-    batch_src = pos_src.reshape(bs, 1).repeat(1, num_samples)  # [[src1, src1, ...], [src2, src2, ...]]
-    batch_src[:, 1:ns_samples+1] = neg_src  # replace pos_src with negatives
-    batch_prod = pos_prod.reshape(bs, 1).repeat(1, num_samples)
-    batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_prod  # replace pos_prod with negatives
-    batch_dst = pos_dst.reshape(bs, 1).repeat(1, num_samples)
-    batch_dst[:, (2*ns_samples)+1:] = neg_dst  # replace pos_dst with negatives
+    else:
+        #using the current negative sampling for hypergraph
+        neg_batch_list = neg_sampler.query_batch(pos_src, pos_dst, pos_prod, pos_t, split_mode=split_mode)
+        assert len(neg_batch_list) == bs
+        neg_batch_list = torch.Tensor(np.array(neg_batch_list)).to(device).int()
+        num_samples = neg_batch_list.size(1) + 1
+        neg_src = neg_batch_list[:,:,0]
+        neg_dst = neg_batch_list[:,:,1]
+        neg_prod = neg_batch_list[:,:,2]
+        batch_src = torch.cat((torch.unsqueeze(pos_src,-1), neg_src), dim = -1)
+        batch_dst = torch.cat((torch.unsqueeze(pos_dst,-1), neg_dst), dim = -1)
+        batch_prod = torch.cat((torch.unsqueeze(pos_prod,-1), neg_prod), dim = -1)
+        
+    if (neg_sampler is None or use_prev_sampling == True):
+        num_samples = (3*ns_samples)+1  # total num samples per data point
+        batch_src = pos_src.reshape(bs, 1).repeat(1, num_samples)  # [[src1, src1, ...], [src2, src2, ...]]
+        batch_src[:, 1:ns_samples+1] = neg_src  # replace pos_src with negatives
+        batch_prod = pos_prod.reshape(bs, 1).repeat(1, num_samples)
+        batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_prod  # replace pos_prod with negatives
+        batch_dst = pos_dst.reshape(bs, 1).repeat(1, num_samples)
+        batch_dst[:, (2*ns_samples)+1:] = neg_dst  # replace pos_dst with negatives
 
     src, dst, prod = batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten()  # row-wise flatten
     f_id = torch.cat([src, dst]).unique()
@@ -134,7 +151,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', update_params=True, 
           ns_samples=6, neg_sampler=None, split_mode="val",
-          num_firms=None, num_products=None):
+          num_firms=None, num_products=None, use_prev_sampling = False):
     """
     Training procedure for TGN-PL model.
     Parameters:
@@ -151,6 +168,8 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         split_mode: in ['val', 'test'], used for neg_sampler
         num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
+        use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
+                            (that is, without correction to the loose negatives on Oct 24)
     Returns:
         total loss, logits loss (from dynamic link prediction), inventory loss
     """
@@ -182,7 +201,8 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
 
         y_pred, inv_loss, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
-                                       num_firms=num_firms, num_products=num_products)
+                                       num_firms=num_firms, num_products=num_products, use_prev_sampling = use_prev_sampling)
+      
         if loss_name == 'ce-softmax':
             target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
             logits_loss = criterion(y_pred, target)
@@ -215,7 +235,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
-         split_mode="val", metric="mrr", num_firms=None, num_products=None):
+         split_mode="val", metric="mrr", num_firms=None, num_products=None, use_prev_sampling = False):
     """
     Evaluation procedure for TGN-PL model.
     Evaluation happens as 'one vs. many', meaning that each positive edge is evaluated against many negative edges
@@ -232,6 +252,8 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         metric: in ['mrr', 'hits@'], which metric to use in evaluator
         num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
+        use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
+                            (that is, without correction to the loose negatives on Oct 24)
     Returns:
         perf_metric: the result of the performance evaluaiton
     """
@@ -248,7 +270,8 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     for batch in tqdm(data_loader):
         y_pred, _, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
-                                       num_firms=num_firms, num_products=num_products)
+                                       num_firms=num_firms, num_products=num_products,
+                                       use_prev_sampling = use_prev_sampling)
         input_dict = {
             "y_pred_pos": y_pred[:, :1],
             "y_pred_neg": y_pred[:, 1:],
@@ -312,6 +335,7 @@ def get_tgnpl_args():
     parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
     parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
     parser.add_argument('--train_on_val', type=bool, default=False, help='If true, train on validation set with fixed negative sampled; used for debugging')
+    parser.add_argument('--use_prev_sampling', action='store_true', help = "if true, use previous hypergraph sampling method")
     
     try:
         args = parser.parse_args()
@@ -351,7 +375,9 @@ def get_unique_id_for_experiment(args):
 # Global variables
 MODEL_NAME = 'TGNPL'
 NUM_NEIGHBORS = 10
-PATH_TO_DATASETS = f'/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
+#PATH_TO_DATASETS = f'/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
+TGB_DIRECTORY = "/".join(str(__file__).split("/")[:-4])
+PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
 NUM_FIRMS = -1
 NUM_PRODUCTS = -1    
     
@@ -503,8 +529,9 @@ def run_experiment(args):
     # set global data variables
     num_nodes = len(metadata["id2entity"])  
     NUM_FIRMS = metadata["product_threshold"]
-    NUM_PRODUCTS = num_nodes - NUM_FIRMS              
-    dataset = PyGLinkPropPredDatasetHyper(name=args.dataset, root="datasets")
+    NUM_PRODUCTS = num_nodes - NUM_FIRMS        
+    dataset = PyGLinkPropPredDatasetHyper(name=args.dataset, root="datasets", 
+                                          use_prev_sampling = args.use_prev_sampling)
     metric = dataset.eval_metric
     neg_sampler = dataset.negative_sampler
     evaluator = Evaluator(name=args.dataset)
@@ -561,13 +588,17 @@ def run_experiment(args):
             start_epoch_train = timeit.default_timer()
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
-                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
-                                                    neg_sampler=neg_sampler, split_mode="val")
+
+                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
+                                                    neg_sampler=neg_sampler, split_mode="val", 
+                                                    use_prev_sampling = args.use_prev_sampling)
                 # Reset memory and graph for beginning of val
                 model['memory'].reset_state()  
                 neighbor_loader.reset_state()
             else:
-                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, train_loader, device)
+              
+                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, train_loader, device,
+                                                    use_prev_sampling = args.use_prev_sampling)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             print(
@@ -578,7 +609,7 @@ def run_experiment(args):
             # validation
             start_val = timeit.default_timer()
             perf_metric_val = test(model, neighbor_loader, data, val_loader, neg_sampler, evaluator,
-                                   device, split_mode="val", metric=metric)
+                                   device, split_mode="val", metric=metric, use_prev_sampling = args.use_prev_sampling)
             time_val = timeit.default_timer() - start_val
             print(f"\tValidation {metric}: {perf_metric_val: .4f}")
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
@@ -633,7 +664,7 @@ def run_experiment(args):
         dataset.load_test_ns()  # load test negatives
         start_test = timeit.default_timer()
         perf_metric_test = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
-                                device, split_mode="test", metric=metric)
+                                device, split_mode="test", metric=metric, use_prev_sampling = args.use_prev_sampling)
 
         print(f"INFO: Test: Evaluation Setting: >>> ONE-VS-MANY <<< ")
         print(f"\tTest: {metric}: {perf_metric_test: .4f}")
