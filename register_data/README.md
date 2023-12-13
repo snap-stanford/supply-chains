@@ -2,7 +2,7 @@
 
 This module is for transfiguring the `logistic_data` into a form usable for GNNs—that is, graphs with firms as <em>nodes</em> and time-stamped <em>edges</em> as (aggregated) transactions between firms. 
 
-*Note:* If you're using the Tesla dataset instead, run `register_data/preprocess_table.py` instead—see the file itself for usage documentation—then proceed directly to the **Crystallization into TGB Data Format** step.
+*Note:* If you're using the Tesla dataset instead, run `register_data/preprocess_tesla.py` instead—see the file itself for usage documentation—then proceed directly to the **Crystallization into TGB Data Format** step. The procedure for using the synthetic data is analagous, except run `register_data/preprocess_synthetic.py`.
 
 ## Environment & Setup
 This should be run on the Hitachi `JupyterHub` server, interlaced with their remote `AWS ec2` data container and RedShift API. Install the following libraries.
