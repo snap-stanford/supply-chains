@@ -589,7 +589,7 @@ def run_experiment(args):
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
 
-                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
+                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
                                                     neg_sampler=neg_sampler, split_mode="val", 
                                                     use_prev_sampling = args.use_prev_sampling)
                 # Reset memory and graph for beginning of val
@@ -597,7 +597,7 @@ def run_experiment(args):
                 neighbor_loader.reset_state()
             else:
               
-                loss, logits_loss, inv_loss = train(model, opt, neighbor_loader, data, train_loader, device,
+                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, train_loader, device,
                                                     use_prev_sampling = args.use_prev_sampling)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train

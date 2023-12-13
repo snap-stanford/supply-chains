@@ -53,6 +53,8 @@ DATA_EVAL_METRIC_DICT = {
 
 DATA_EVAL_METRIC_DICT.update(
     {f"tgbl-supplychains{prod}{year}": "mrr" for year in list(range(2019, 2022 + 1)) + ["all_years"] for prod in ["","product"]})
+DATA_EVAL_METRIC_DICT.update(
+    {f"tgbl-hypergraph{year}": "mrr" for year in list(range(2019, 2022 + 1)) + ["all_years","_tesla","_synthetic","_2019_to_2022"]})
 
 DATA_NUM_CLASSES = {
     "tgbn-trade": 255,

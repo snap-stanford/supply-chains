@@ -357,7 +357,7 @@ if __name__ == "__main__":
     test_max_ts = max(timestamps)
 
     global E_train; global E_val; global E_test
-    E_train, E_val, E_test = partition_edges(df, train_max_ts, val_max_ts, test_max_ts)
+    E_train, E_val, E_test = partition_edges(df, train_max_ts, val_max_ts, test_max_ts, use_prev_sampling = args.use_prev_sampling)
 
     global E_train_edges
     E_train_edges = set([(source, target, product) for ts in E_train for source, target, product in E_train[ts]])

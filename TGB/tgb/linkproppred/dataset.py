@@ -96,7 +96,9 @@ class LinkPropPredDataset(object):
             raise FileNotFoundError(f"Directory not found at {self.root}")
 
         if preprocess:
-            self.pre_process(isHyperGraph = self.name in ['tgbl-hypergraph','tgbl-sync'])
+            isHyperGraphBool = ("tgbl-hypergraph" in self.name or "tgbl-sync" in self.name)
+            self.pre_process(isHyperGraph = isHyperGraphBool)
+            #self.pre_process(isHyperGraph = self.name in ['tgbl-hypergraph','tgbl-sync'])
 
         #TODO: adjust the Negative Edge Sampler to work with the hypergraph data
         if ("tgbl-hypergraph" in self.name and use_prev_sampling == True):
