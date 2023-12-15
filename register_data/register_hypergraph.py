@@ -306,22 +306,52 @@ def edge_sampler_wrapper(split): #returns an edge sampler function for either th
             loose_hist_sampled = [loose_hist[j] for j in loose_hist_sampled_idx]
             hist_sampled += loose_hist_sampled 
     
+    
+
+        #ensure the random negatives aren't historical 
+        #hist_edge_lexicon = ts_eval_edges_set.union(E_train_edges)
+        rand_s = [s for s in L_firm if (s, pos_d, pos_p) not in ts_eval_edges_set and (s, pos_d, pos_p) not in E_train_edges]
+        rand_d = [d for d in L_firm if (pos_s, d, pos_p) not in ts_eval_edges_set and (pos_s, d, pos_p) not in E_train_edges]
+        rand_p = [p for p in L_products if (pos_s, pos_d, p) not in ts_eval_edges_set and (pos_s, pos_d, p) not in E_train_edges]
+        
         # sample random negatives 
         hist_deficit = num_samples // 2 - len(hist_sampled)
         random_surplus = [0,0,0]
         for _ in range(hist_deficit):
             random_surplus[int(3 * np.random.rand())] += 1
-    
-        #ensure the random negatives aren't historical 
-        hist_edge_lexicon = ts_eval_edges_set.union(E_train_edges)
-        rand_s = [s for s in L_firm if (s, pos_d, pos_p) not in ts_eval_edges_set and (s, pos_d, pos_p) not in E_train_edges]
-        rand_d = [d for d in L_firm if (pos_s, d, pos_p) not in hist_edge_lexicon and (pos_s, d, pos_p) not in E_train_edges]
-        rand_p = [p for p in L_products if (pos_s, pos_d, p) not in hist_edge_lexicon and (pos_s, pos_d, p) not in E_train_edges]
+        
+        #TODO: safety-check in case not enough random negatives (keep waterfalling)
+        num_new_s = num_samples // 6  + random_surplus[0] #positive
+        num_new_d = num_samples // 6  + random_surplus[1] #positive
+        num_new_p = num_samples // 6  + random_surplus[2] # positive
+        
+        emergency_s, emergency_d, emergency_p = False, False, False
+        while (len(rand_s) < num_new_s and num_new_s >= 0):
+            num_new_s -= 1
+            num_new_d += 1
+        while (len(rand_d) < num_new_d and num_new_d >= 0):
+            num_new_d -= 1
+            num_new_p += 1
+        if (len(rand_p) < num_new_p):
+            #emergency activation 
+            if (len(rand_p) > 0):
+                emergency_p = True 
+            elif (len(rand_s) > 0):
+                num_new_s += num_new_p
+                num_new_p = 0
+                emergency_s = True
+            elif (len(rand_d) > 0):
+                num_new_d += num_new_p
+                num_new_p = 0
+                emergency_d = True 
+            else: 
+                raise ValueError("no random negatives at time stamp {}".format(ts))
     
         #sample num_samples // 6 of each perturbation class, plus extras if there is a deficit of historical negatives
-        rand_s_sampled = np.random.choice(rand_s, size = num_samples // 6 + random_surplus[0], replace = False)
-        rand_d_sampled = np.random.choice(rand_d, size = num_samples // 6 + random_surplus[1], replace = False)
-        rand_p_sampled = np.random.choice(rand_p, size = num_samples // 6 + random_surplus[2], replace = False)
+        rand_s_sampled = np.random.choice(rand_s, size = num_new_s, replace = emergency_s)
+        rand_d_sampled = np.random.choice(rand_d, size = num_new_d, replace = emergency_d)
+        rand_p_sampled = np.random.choice(rand_p, size = num_new_p, replace = emergency_p)
+
         rand_s_sampled = [(s,pos_d,pos_p) for s in rand_s_sampled]
         rand_d_sampled = [(pos_s,d,pos_p) for d in rand_d_sampled]
         rand_p_sampled = [(pos_s, pos_d, p) for p in rand_p_sampled]
@@ -366,6 +396,7 @@ if __name__ == "__main__":
     num_samples = args.num_samples
     L_firm = list(range(0, product_min_id))
     L_products = list(range(product_min_id, len(id2entity)))
+    print(len(L_firm), len(L_products))
 
    # E_train_edges = [(s,d,p,t) for t in E_train for s,d,p in E_train[t]]
     if (args.use_prev_sampling == False):
