@@ -69,26 +69,24 @@ def get_positive_rank(train_frequency_dict, pos_edge, neg_edges, isBinary = Fals
 
     #return np.random.choice(ranks) 
     
-if __name__ == "__main__":
-    args = get_args()
-    USE_FREQ = args.use_freq
+def run_hyperedgebank(dataset_name, dir, use_freq):
 
-    with open(os.path.join(args.dir,f'{args.dataset_name}_val_ns.pkl'), 'rb') as file:
+    with open(os.path.join(dir,f'{dataset_name}_val_ns.pkl'), 'rb') as file:
         val_ns = pickle.load(file)
         val_ts = sorted(list(set([ts for s,d,p,ts in val_ns.keys()])))
         val_min_ts, val_max_ts = min(val_ts), max(val_ts)
         
-    with open(os.path.join(args.dir, f'{args.dataset_name}_test_ns.pkl'), 'rb') as file:
+    with open(os.path.join(dir, f'{dataset_name}_test_ns.pkl'), 'rb') as file:
         test_ns = pickle.load(file)
         test_ts = sorted(list(set([ts for s,d,p,ts in test_ns.keys()])))
         test_min_ts, test_max_ts = min(test_ts), max(test_ts)
     
-    with open(os.path.join(args.dir, f'{args.dataset_name}_meta.json'),"r") as file:
+    with open(os.path.join(dir, f'{dataset_name}_meta.json'),"r") as file:
         metadata = json.load(file)
         product_min_id, id2entity, train_max_ts, val_max_ts, test_max_ts = (metadata[key] for key in 
                             ["product_threshold", "id2entity", "train_max_ts", "val_max_ts", "test_max_ts"])
         
-    df_edgelist = pd.read_csv(os.path.join(args.dir,f'{args.dataset_name}_edgelist.csv'))
+    df_edgelist = pd.read_csv(os.path.join(dir,f'{dataset_name}_edgelist.csv'))
     df_edgelist_train = df_edgelist[df_edgelist["ts"] <= train_max_ts]
     edgelist_train = [list(df_edgelist_train[column]) for column in ["source","target","product","ts"]]
     
@@ -103,25 +101,24 @@ if __name__ == "__main__":
     val_ranks, val_hist = [], {ts: {"hist": 0, "loose_hist": 0, "rand": 0} for ts in val_ts}
     for s, d, p, t in tqdm(val_ns): 
         negative_samples = [(s,d,p) for s,d,p in val_ns[(s,d,p,t)].astype(int)]
-        rank = get_positive_rank(train_edge_frequency, (s,d,p), negative_samples, not args.use_freq)
-       # neg_sample_breakdown = get_hist_breakdown(set(train_edge_frequency.keys()), (s,d,p), negative_samples)
-       # for key in neg_sample_breakdown:
-       #     val_hist[t][key] += neg_sample_breakdown[key]
+        rank = get_positive_rank(train_edge_frequency, (s,d,p), negative_samples, not use_freq)
         val_ranks.append(rank) 
 
     test_ranks, test_hist = [], {ts: {"hist": 0, "loose_hist": 0, "rand": 0} for ts in val_ts}
     for s, d, p, t in tqdm(test_ns): 
         negative_samples = [(s,d,p) for s,d,p in test_ns[(s,d,p,t)].astype(int)]
-        rank = get_positive_rank(train_edge_frequency, (s,d,p), negative_samples, not args.use_freq)
-       # neg_sample_breakdown = get_hist_breakdown(set(train_edge_frequency.keys()), (s,d,p), negative_samples)
-       # for key in neg_sample_breakdown:
-       #     test_hist[t][key] += neg_sample_breakdown[key]
+        rank = get_positive_rank(train_edge_frequency, (s,d,p), negative_samples, not use_freq)
         test_ranks.append(rank) 
 
     val_mean_MRR = calc_mean_MRR(val_ranks)
     test_mean_MRR = calc_mean_MRR(test_ranks)
     
     MRR_dict = {"val": val_mean_MRR, "test": test_mean_MRR}
+    return MRR_dict
+
+if __name__ == "__main__":
+    args = get_args()
+    MRR_dict = run_hyperedgebank(args.dataset_name, args.dir, args.use_freq)
     print(MRR_dict)
         
         
