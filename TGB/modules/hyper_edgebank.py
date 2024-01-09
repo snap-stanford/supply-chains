@@ -5,7 +5,7 @@ it predicts the existence of edges based on their history of occurrence
 
 import torch
 from tqdm import tqdm
-
+import numpy as np
 
 class HyperEdgeBankPredictor(object):
     def __init__(self,
@@ -59,7 +59,8 @@ class HyperEdgeBankPredictor(object):
         return scores
     
 
-def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, use_counts=True):
+def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, use_counts=True,
+                  use_prev_sampling=False, ns_samples=6):
     r"""
     Evaluated the dynamic link prediction
     Evaluation happens as 'one vs. many', meaning that each positive edge is evaluated against many negative edges
@@ -77,6 +78,7 @@ def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, 
     perf_list = []  # mean metric per batch
     batch_size = []
     for pos_batch in tqdm(loader):
+        
         pos_src, pos_prod, pos_dst, pos_t, pos_msg = (
             pos_batch.src,
             pos_batch.prod,
@@ -84,18 +86,38 @@ def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, 
             pos_batch.t,
             pos_batch.msg,
         )
-        
         bs = len(pos_src)
-        neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
-        neg_batch_list = torch.Tensor(neg_batch_list)
-        ns_samples = neg_batch_list.size(1) // 3 
-        batch_src = pos_src.reshape(bs, 1).repeat(1, 1+(3*ns_samples))  # [[src1, src1, ...], [src2, src2, ...]]
-        batch_src[:, 1:ns_samples+1] = neg_batch_list[:, :ns_samples]  # replace pos_src with negatives
-        batch_prod = pos_prod.reshape(bs, 1).repeat(1, 1+(3*ns_samples))
-        batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_batch_list[:, ns_samples:(2*ns_samples)]  # replace pos_prod with negatives
-        batch_dst = pos_dst.reshape(bs, 1).repeat(1, 1+(3*ns_samples))
-        batch_dst[:, (2*ns_samples)+1:] = neg_batch_list[:, (2*ns_samples):]  # replace pos_dst with negatives
         
+        if use_prev_sampling == True:
+            #using the negative sampling procedure prior to Oct 24 (no loose negatives)
+            neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
+            assert len(neg_batch_list) == bs
+            neg_batch_list = torch.Tensor(neg_batch_list)
+            ns_samples = neg_batch_list.size(1) // 3  # num negative samples per src/prod/dst
+            neg_src = neg_batch_list[:, :ns_samples]   # we assume neg batch is ordered by neg_src, neg_prod, neg_dst
+            neg_prod = neg_batch_list[:, ns_samples:(2*ns_samples)]  
+            neg_dst = neg_batch_list[:, (2*ns_samples):] 
+            
+            num_samples = (3*ns_samples)+1  # total num samples per data point
+            batch_src = pos_src.reshape(bs, 1).repeat(1, num_samples)  # [[src1, src1, ...], [src2, src2, ...]]
+            batch_src[:, 1:ns_samples+1] = neg_src  # replace pos_src with negatives
+            batch_prod = pos_prod.reshape(bs, 1).repeat(1, num_samples)
+            batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_prod  # replace pos_prod with negatives
+            batch_dst = pos_dst.reshape(bs, 1).repeat(1, num_samples)
+            batch_dst[:, (2*ns_samples)+1:] = neg_dst  # replace pos_dst with negatives
+        else:
+            #using the current negative sampling for hypergraph
+            neg_batch_list = neg_sampler.query_batch(pos_src, pos_dst, pos_prod, pos_t, split_mode=split_mode)
+            assert len(neg_batch_list) == bs
+            neg_batch_list = torch.Tensor(np.array(neg_batch_list)).int()
+            num_samples = neg_batch_list.size(1) + 1
+            neg_src = neg_batch_list[:,:,0]
+            neg_dst = neg_batch_list[:,:,1]
+            neg_prod = neg_batch_list[:,:,2]
+            batch_src = torch.cat((torch.unsqueeze(pos_src,-1), neg_src), dim = -1)
+            batch_dst = torch.cat((torch.unsqueeze(pos_dst,-1), neg_dst), dim = -1)
+            batch_prod = torch.cat((torch.unsqueeze(pos_prod,-1), neg_prod), dim = -1)
+                 
         y_pred = edgebank.predict(batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten(),
                                   use_counts=use_counts)
         y_pred = y_pred.reshape(bs, 1+(3*ns_samples))
@@ -106,6 +128,7 @@ def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, 
         }
         perf_list.append(evaluator.eval(input_dict)[metric])
         batch_size.append(len(pos_src))
+        
     num = (torch.tensor(perf_list) * torch.tensor(batch_size)).sum()
     denom = torch.tensor(batch_size).sum()
     perf_metrics = float(num/denom)
