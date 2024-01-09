@@ -134,7 +134,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     assoc[n_id] = torch.arange(n_id.size(0), device=device)
 
     # Get updated memory of all nodes involved in the computation.
-    memory, last_update, inv_loss, update_loss = model['memory'](n_id)
+    memory, last_update, update_loss = model['memory'](n_id)
     z = model['gnn'](
         memory,
         last_update,
@@ -145,7 +145,13 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
 
     y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
     y_pred = y_pred.reshape(bs, num_samples)
-    return y_pred, inv_loss, update_loss
+    return y_pred, update_loss
+    
+def _update_inventory_and_compute_loss(batch, model):
+    """
+    Update inventory per firm based on latest batch and compute losses.
+    """
+    return 0
     
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
@@ -199,21 +205,23 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         if update_params:
             optimizer.zero_grad()
 
-        y_pred, inv_loss, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_pred, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products, use_prev_sampling = use_prev_sampling)
+        inv_loss = _update_inventory_and_compute_loss(batch, model)
       
         if loss_name == 'ce-softmax':
             target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
             logits_loss = criterion(y_pred, target)
         else:
-            # original loss from TGB
+            # original binary loss from TGB
             assert y_pred.size(1) == (3*ns_samples)+1
             pos_out = y_pred[:, :1]
             neg_out = y_pred[:, 1:]            
             logits_loss = criterion(pos_out, torch.ones_like(pos_out))
             logits_loss += criterion(neg_out, torch.zeros_like(neg_out))
         
+        # three losses: logits loss from link prediction, inventory loss, and memory update loss
         loss = logits_loss + inv_loss + update_loss
         total_loss += float(loss) * batch.num_events  # scale by batch size
         total_logits_loss += float(logits_loss) * batch.num_events
@@ -221,10 +229,10 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         total_update_loss += float(update_loss) * batch.num_events
         total_num_events += batch.num_events
         
-        # Update memory and neighbor loader with ground-truth state.
+        # Update memory and neighbor loader with ground-truth transactions
         model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
         neighbor_loader.insert(batch.src, batch.dst, batch.prod)
-        
+                
         # Update model parameters with backprop
         if update_params:
             loss.backward()
@@ -268,7 +276,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     batch_size = []
     
     for batch in tqdm(data_loader):
-        y_pred, _, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_pred, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products,
                                        use_prev_sampling = use_prev_sampling)
@@ -396,16 +404,13 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     mem_out = args.mem_dim+num_products if args.use_inventory else args.mem_dim
     if args.memory_name == 'tgnpl':
         memory = TGNPLMemory(
-            use_inventory = args.use_inventory,
             num_nodes = num_nodes,
             num_prods = num_products,
             raw_msg_dim = data.msg.size(-1),
-            state_dim = args.mem_dim,
+            memory_dim = args.mem_dim,
             time_dim = args.time_dim,
             message_module=TGNPLMessage(data.msg.size(-1), mem_out, args.time_dim),
             aggregator_module=MeanAggregator(),
-            debt_penalty=args.debt_penalty,
-            consumption_reward=args.consum_rwd,
             update_penalty=args.update_penalty,
         ).to(device)
     else:
