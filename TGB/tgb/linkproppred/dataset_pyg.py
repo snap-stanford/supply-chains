@@ -14,6 +14,7 @@ class PyGLinkPropPredDataset(Dataset):
         root: str,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
+        use_prev_sampling = False
     ):
         r"""
         PyG wrapper for the LinkPropPredDataset
@@ -27,7 +28,7 @@ class PyGLinkPropPredDataset(Dataset):
         """
         self.name = name
         self.root = root
-        self.dataset = LinkPropPredDataset(name=name, root=root)
+        self.dataset = LinkPropPredDataset(name=name, root=root, use_prev_sampling = use_prev_sampling)
         self._train_mask = torch.from_numpy(self.dataset.train_mask)
         self._val_mask = torch.from_numpy(self.dataset.val_mask)
         self._test_mask = torch.from_numpy(self.dataset.test_mask)
