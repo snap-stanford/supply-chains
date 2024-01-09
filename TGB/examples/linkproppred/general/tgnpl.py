@@ -31,6 +31,7 @@ from modules.msg_func import TGNPLMessage
 from modules.msg_agg import MeanAggregator
 from modules.neighbor_loader import LastNeighborLoaderTGNPL
 from modules.memory_module import TGNPLMemory, StaticMemory
+from modules.inventory_module import TGNPLInventory
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPredDatasetHyper
 
@@ -147,12 +148,38 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     y_pred = y_pred.reshape(bs, num_samples)
     return y_pred, update_loss
     
-def _update_inventory_and_compute_loss(batch, model):
+    
+def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
+                                       num_firms=None, num_products=None):
     """
     Update inventory per firm based on latest batch and compute losses.
     """
-    return 0
+    # use global variables when arguments are not specified
+    if num_firms is None:
+        num_firms = NUM_FIRMS
+    if num_products is None:
+        num_products = NUM_PRODUCTS
+    num_nodes = num_firms + num_products
+    # Helper vector to map global node indices to local ones
+    assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
     
+    # get product embeddings
+    f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
+    p_id = torch.arange(NUM_FIRMS, NUM_FIRMS+NUM_PRODUCTS, device=device).long()  # all product IDs
+    n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
+    assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
+    memory, last_update, update_loss = model['memory'](n_id)
+    z = model['gnn'](
+        memory,
+        last_update,
+        edge_index,
+        repeat_tensor(data.t, 2)[e_id].to(device),
+        repeat_tensor(data.msg, 2)[e_id].to(device),
+    )
+    prod_embs = z[assoc[p_id]]
+    inv_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
+    return inv_loss
+
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', update_params=True, 
@@ -177,17 +204,15 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
                             (that is, without correction to the loose negatives on Oct 24)
     Returns:
-        total loss, logits loss (from dynamic link prediction), inventory loss
+        total loss, logits loss (from dynamic link prediction), inventory loss, memory update loss
     """
     assert loss_name in ['ce-softmax', 'bce-logits']    
     if update_params:
-        model['memory'].train()
-        model['gnn'].train()
-        model['link_pred'].train()
+        for module in model.values():
+            module.train()
     else:
-        model['memory'].eval()
-        model['gnn'].eval()
-        model['link_pred'].eval()
+        for module in model.values():
+            module.eval()
 
     model['memory'].reset_state()  # Start with a fresh memory.
     neighbor_loader.reset_state()  # Start with an empty graph.
@@ -208,7 +233,11 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         y_pred, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products, use_prev_sampling = use_prev_sampling)
-        inv_loss = _update_inventory_and_compute_loss(batch, model)
+        if 'inventory' in model:  # will be in model if args.use_inventory = True
+            inv_loss = _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
+                                                      num_firms=num_firms, num_products=num_products)
+        else:
+            inv_loss = 0
       
         if loss_name == 'ce-softmax':
             target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
@@ -238,6 +267,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             loss.backward()
             optimizer.step()
             model['memory'].detach()
+            model['inventory'].detach()
 
     return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events, total_update_loss / total_num_events
 
@@ -335,9 +365,9 @@ def get_tgnpl_args():
     parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
     parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
-    parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory in TGNPL memory', default=False)
-    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for calculating TGNPL memory inventory loss', default=0)
-    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for calculating TGNPL memory inventory loss', default=0)
+    parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory module', default=False)
+    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for inventory loss', default=10)
+    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for inventory loss', default=1)
     parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
@@ -401,7 +431,6 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     num_nodes = num_firms + num_products
 
     # initialize memory module
-    mem_out = args.mem_dim+num_products if args.use_inventory else args.mem_dim
     if args.memory_name == 'tgnpl':
         memory = TGNPLMemory(
             num_nodes = num_nodes,
@@ -409,26 +438,25 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
             raw_msg_dim = data.msg.size(-1),
             memory_dim = args.mem_dim,
             time_dim = args.time_dim,
-            message_module=TGNPLMessage(data.msg.size(-1), mem_out, args.time_dim),
+            message_module=TGNPLMessage(data.msg.size(-1), args.mem_dim, args.time_dim),
             aggregator_module=MeanAggregator(),
             update_penalty=args.update_penalty,
         ).to(device)
     else:
         assert args.memory_name == 'static'
-        assert not args.use_inventory
         memory = StaticMemory(num_nodes = num_nodes, memory_dim = args.mem_dim, time_dim = args.time_dim).to(device)
 
     # initialize GNN
     if args.emb_name == 'attn':
         gnn = GraphAttentionEmbedding(
-            in_channels=mem_out,
+            in_channels=args.mem_dim,
             out_channels=args.emb_dim,
             msg_dim=data.msg.size(-1),
             time_enc=memory.time_enc,
         ).to(device)
     elif args.emb_name == 'sum':
         gnn = GraphSumEmbedding(
-            in_channels=mem_out,
+            in_channels=arg.mem_dim,
             out_channels=args.emb_dim
         ).to(device)
     else:
@@ -436,18 +464,31 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         gnn = IdentityEmbedding().to(device)
 
     # initialize decoder
-    link_emb = mem_out if args.emb_name == 'id' else args.emb_dim
+    link_emb = args.mem_dim if args.emb_name == 'id' else args.emb_dim
     link_pred = LinkPredictorTGNPL(in_channels=link_emb).to(device)
 
     # put together in model and initialize optimizer
     model = {'memory': memory,
              'gnn': gnn,
              'link_pred': link_pred}
-    optimizer = torch.optim.Adam(
-        set(model['memory'].parameters()) | set(model['gnn'].parameters()) | set(model['link_pred'].parameters()),
-        lr=args.lr,
-    )
+    all_params = set(model['memory'].parameters()) | set(model['gnn'].parameters()) | set(model['link_pred'].parameters())
+    
+    # add inventory module if required
+    if args.use_inventory:
+        inventory = TGNPLInventory(
+            num_firms = num_firms,
+            num_prods = num_products,
+            debt_penalty = args.debt_penalty,
+            consumption_reward = args.consum_rwd,
+            device = device,
+            emb_dim = link_emb,
+        ).to(device)
+        model['inventory'] = inventory
+        all_params = all_params | set(model['inventory'].parameters())
+    
+    optimizer = torch.optim.Adam(all_params,lr=args.lr)
     return model, optimizer
+
   
 def set_up_data(args, data, dataset):
     """
