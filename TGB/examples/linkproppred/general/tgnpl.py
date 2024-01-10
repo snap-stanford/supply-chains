@@ -267,7 +267,8 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             loss.backward()
             optimizer.step()
             model['memory'].detach()
-            model['inventory'].detach()
+            if 'inventory' in model:
+                model['inventory'].detach()
 
     return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events, total_update_loss / total_num_events
 
