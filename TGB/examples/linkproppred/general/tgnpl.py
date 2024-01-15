@@ -165,7 +165,7 @@ def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devi
     
     # get product embeddings
     f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
-    p_id = torch.arange(NUM_FIRMS, NUM_FIRMS+NUM_PRODUCTS, device=device).long()  # all product IDs
+    p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
     n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
     assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
     memory, last_update, update_loss = model['memory'](n_id)
@@ -178,6 +178,7 @@ def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devi
     )
     prod_embs = z[assoc[p_id]]
     inv_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
+    
     return inv_loss
 
 
@@ -457,7 +458,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         ).to(device)
     elif args.emb_name == 'sum':
         gnn = GraphSumEmbedding(
-            in_channels=arg.mem_dim,
+            in_channels=args.mem_dim,
             out_channels=args.emb_dim
         ).to(device)
     else:
