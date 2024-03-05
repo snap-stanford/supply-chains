@@ -44,10 +44,10 @@ class TGNPLInventory(torch.nn.Module):
         att_weights = self._get_prod_attention(prod_emb)
         total_consumed = total_supplied @ att_weights  # num_firms x num_products
         assert self.inventory.shape == total_consumed.shape
-        inv_loss = self._compute_inventory_loss(self.inventory, total_consumed)
+        inv_loss, debt_loss, consump_rwd_loss = self._compute_inventory_loss(self.inventory, total_consumed)
         total_bought = self._compute_totals_per_firm_and_product(dst, prod, raw_msg)
         self.inventory = torch.clip(self.inventory - total_consumed + total_bought, 0, None)
-        return inv_loss / len(src)  # loss is scaled by batch size in tgnpl.py
+        return inv_loss / len(src), debt_loss / len(src), consump_rwd_loss / len(src)  # loss is scaled by batch size in tgnpl.py
     
     def detach(self):
         """
@@ -91,5 +91,7 @@ class TGNPLInventory(torch.nn.Module):
         diff = torch.maximum(consumption - inventory, torch.zeros_like(inventory, device=self.device))  # entrywise max
         total_debt = torch.sum(diff, dim=-1)  # n_firms, sum of entries where consumption is greater than inventory
         total_consumption = torch.sum(consumption, dim=-1)  # n_firms
-        loss = (self.debt_penalty * total_debt) - (self.consumption_reward * total_consumption)
-        return loss.sum() 
+        debt_loss = self.debt_penalty * total_debt
+        consump_rwd_loss = self.consumption_reward * total_consumption
+        loss = debt_loss - consump_rwd_loss
+        return loss.sum(), debt_loss.sum(), consump_rwd_loss.sum()

@@ -148,7 +148,6 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     y_pred = y_pred.reshape(bs, num_samples)
     return y_pred, update_loss
     
-    
 def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                        num_firms=None, num_products=None):
     """
@@ -177,9 +176,9 @@ def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devi
         repeat_tensor(data.msg, 2)[e_id].to(device),
     )
     prod_embs = z[assoc[p_id]]
-    inv_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
+    inv_loss, debt_loss, consump_rwd_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
     
-    return inv_loss
+    return inv_loss, debt_loss, consump_rwd_loss
 
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
@@ -225,7 +224,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         # sigmoid then binary cross entropy, used in TGB
         criterion = torch.nn.BCEWithLogitsLoss()
     
-    total_loss, total_logits_loss, total_inv_loss, total_update_loss, total_num_events = 0, 0, 0, 0, 0
+    total_loss, total_logits_loss, total_inv_loss, total_debt_loss, total_consump_rwd_loss, total_update_loss, total_num_events = 0, 0, 0, 0, 0, 0, 0
     for batch in tqdm(data_loader):        
         batch = batch.to(device)
         if update_params:
@@ -235,10 +234,10 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
                                        ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products, use_prev_sampling = use_prev_sampling)
         if 'inventory' in model:  # will be in model if args.use_inventory = True
-            inv_loss = _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
+            inv_loss, debt_loss, consump_rwd_loss = _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                                       num_firms=num_firms, num_products=num_products)
         else:
-            inv_loss = 0
+            inv_loss, debt_loss, consump_rwd_loss = 0, 0, 0
       
         if loss_name == 'ce-softmax':
             target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
@@ -256,6 +255,8 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         total_loss += float(loss) * batch.num_events  # scale by batch size
         total_logits_loss += float(logits_loss) * batch.num_events
         total_inv_loss += float(inv_loss) * batch.num_events
+        total_debt_loss += float(debt_loss) * batch.num_events
+        total_consump_rwd_loss += float(consump_rwd_loss) * batch.num_events
         total_update_loss += float(update_loss) * batch.num_events
         total_num_events += batch.num_events
         
@@ -271,7 +272,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             if 'inventory' in model:
                 model['inventory'].detach()
 
-    return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events, total_update_loss / total_num_events
+    return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events, total_debt_loss / total_num_events, total_consump_rwd_loss / total_num_events, total_update_loss / total_num_events
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
@@ -580,6 +581,8 @@ def run_experiment(args):
     NUM_PRODUCTS = num_nodes - NUM_FIRMS        
     dataset = PyGLinkPropPredDatasetHyper(name=args.dataset, root="datasets", 
                                           use_prev_sampling = args.use_prev_sampling)
+    print(f"There are {NUM_FIRMS} firms and {NUM_PRODUCTS} products")
+    
     metric = dataset.eval_metric
     neg_sampler = dataset.negative_sampler
     evaluator = Evaluator(name=args.dataset)
@@ -637,7 +640,7 @@ def run_experiment(args):
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
 
-                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
+                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
                                                     neg_sampler=neg_sampler, split_mode="val", 
                                                     use_prev_sampling = args.use_prev_sampling)
                 # Reset memory and graph for beginning of val
@@ -645,12 +648,12 @@ def run_experiment(args):
                 neighbor_loader.reset_state()
             else:
               
-                loss, logits_loss, inv_loss, update_loss = train(model, opt, neighbor_loader, data, train_loader, device,
+                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(model, opt, neighbor_loader, data, train_loader, device,
                                                     use_prev_sampling = args.use_prev_sampling)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             print(
-                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Update_Loss: {update_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
+                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Debt_Loss: {debt_loss:.4f}, Consumption_Reward_Loss: {consump_rwd_loss:.4f}, Update_Loss: {update_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
             )
             train_loss_list.append(float(loss))
 
@@ -668,6 +671,8 @@ def run_experiment(args):
                 writer.add_scalar("loss", loss, epoch)
                 writer.add_scalar("logits_loss", logits_loss, epoch)
                 writer.add_scalar("inv_loss", inv_loss, epoch)
+                writer.add_scalar("debt_loss", debt_loss, epoch)
+                writer.add_scalar("consump_rwd_loss", consump_rwd_loss, epoch)
                 writer.add_scalar("update_loss", update_loss, epoch)
                 writer.add_scalar("perf_metric_val", perf_metric_val, epoch)
                 writer.add_scalar("elapsed_time_train", time_train, epoch)
@@ -678,6 +683,8 @@ def run_experiment(args):
                 wandb.log({"loss": loss, 
                            "logits_loss": logits_loss,
                            "inv_loss": inv_loss,
+                           "debt_loss": debt_loss,
+                           "consump_rwd_loss": consump_rwd_loss,
                            "update_loss": update_loss,
                            "perf_metric_val": perf_metric_val, 
                            "elapsed_time_train": time_train, 
@@ -693,7 +700,7 @@ def run_experiment(args):
                     results_filename, replace_file=True)
 
             # check if best on val so far, save if so, stop if no improvement observed for a while
-            if early_stopper.step_check(perf_metric_val, model):
+            if early_stopper.step_check(perf_metric_val, model | {"neighbor_loader": neighbor_loader}): # DEBUG: save neighbor loader in another way
                 break
                 
         # also save final model
@@ -701,7 +708,8 @@ def run_experiment(args):
         print("INFO: save final model to {}".format(model_path))
         model_names = list(model.keys())
         model_components = list(model.values())
-        torch.save({model_names[i]: model_components[i].state_dict() for i in range(len(model_names))}, 
+        torch.save({model_names[i]: model_components[i].state_dict() for i in range(len(model_names))} 
+                   | {"neighbor_loader": neighbor_loader}, # DEBUG: save neighbor loader in another way
                     model_path)
 
         train_val_time = timeit.default_timer() - start_train_val
