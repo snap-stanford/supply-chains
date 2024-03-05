@@ -698,6 +698,17 @@ def run_experiment(args):
                   'train loss': train_loss_list,
                   f'val {metric}': val_perf_list,}, 
                     results_filename, replace_file=True)
+            
+#             # DEBUG attention matrix: save every 10 epochs
+#             if epoch % 10 == 0:
+#                 model_path = os.path.join(save_model_dir, save_model_id + '_' + str(epoch) +'.pth')
+#                 print("INFO: save epoch " + str(epoch) + " model to {}".format(model_path))
+#                 model_names = list(model.keys())
+#                 model_components = list(model.values())
+#                 torch.save({model_names[i]: model_components[i].state_dict() for i in range(len(model_names))}
+#                            | {"neighbor_loader": neighbor_loader}, # DEBUG: save neighbor loader in another way
+#                             model_path)
+#             # END DEBUG
 
             # check if best on val so far, save if so, stop if no improvement observed for a while
             if early_stopper.step_check(perf_metric_val, model | {"neighbor_loader": neighbor_loader}): # DEBUG: save neighbor loader in another way

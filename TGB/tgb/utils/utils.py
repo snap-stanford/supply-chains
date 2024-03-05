@@ -11,8 +11,8 @@ import io
 import datetime
 import pytz
 
-WANDB_TEAM = "supply-chains-gnns"
-WANDB_PROJECT = "model-experiments"
+WANDB_TEAM = "zhiyinl" # "supply-chains-gnns"
+WANDB_PROJECT = "model-experiments-2" # "model-experiments"
 
 # import torch
 def save_pkl(obj: Any, fname: str) -> None:
