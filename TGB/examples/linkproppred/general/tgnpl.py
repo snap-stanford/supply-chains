@@ -711,7 +711,8 @@ def run_experiment(args):
 #             # END DEBUG
 
             # check if best on val so far, save if so, stop if no improvement observed for a while
-            if early_stopper.step_check(perf_metric_val, model | {"neighbor_loader": neighbor_loader}): # DEBUG: save neighbor loader in another way
+            # if early_stopper.step_check(perf_metric_val, model | {"neighbor_loader": neighbor_loader}): # DEBUG: save neighbor loader in another way
+            if early_stopper.step_check(perf_metric_val, model):
                 break
                 
         # also save final model
