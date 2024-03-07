@@ -27,7 +27,7 @@ class TGNPLInventory(torch.nn.Module):
         self.learn_att_direct = learn_att_direct
         self.device = device
             
-        self.inventory = torch.ones(size=(self.num_firms, self.num_prods), requires_grad=False, device=device)
+        self.reset()
         if self.learn_att_direct:
             # learn attention weights directly 
             self.att_weights = Parameter(torch.rand(size=(self.num_prods, self.num_prods), requires_grad=True, device=device))
@@ -54,6 +54,12 @@ class TGNPLInventory(torch.nn.Module):
         Detaches inventory from gradient computation.
         """
         self.inventory.detach_()
+        
+    def reset(self):
+        """
+        Reset inventory for all firms.
+        """
+        self.inventory = torch.ones(size=(self.num_firms, self.num_prods), requires_grad=False, device=self.device)
         
     def _compute_totals_per_firm_and_product(self, firm_ids, prod_ids, raw_msg):
         """
