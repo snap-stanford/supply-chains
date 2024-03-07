@@ -45,12 +45,9 @@ class GraphAttentionEmbedding(torch.nn.Module):
         )
 
     def forward(self, x, last_update, edge_index, t, msg):
-        # TODO: temporarily comment out rel_t for attn -> make 'sum' and 'attn' comparable
-#         rel_t = last_update[edge_index[0]] - t
-#         rel_t_enc = self.time_enc(rel_t.to(x.dtype))
-#         edge_attr = torch.cat([rel_t_enc, msg], dim=-1)
-        # END TODO
-        edge_attr = torch.cat([msg], dim=-1)
+        rel_t = last_update[edge_index[0]] - t
+        rel_t_enc = self.time_enc(rel_t.to(x.dtype))
+        edge_attr = torch.cat([rel_t_enc, msg], dim=-1)
         x = self.conv1(x, edge_index, edge_attr)
         x = self.bns(x)
         x = self.relu(x)
