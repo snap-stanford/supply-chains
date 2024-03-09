@@ -1,0 +1,462 @@
+from collections import Counter
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+import os
+import pandas as pd
+from scipy.sparse import csr_matrix
+from scipy.stats import pearsonr, spearmanr
+
+DATA = 'tgbl-hypergraph_synthetic'
+DATA_DIR = f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{DATA.replace('-', '_')}/"
+
+###################################################
+# Functions to generate synthetic data
+###################################################
+def generate_static_graphs(num_firms, seed=0, min_units=1, max_units=4, 
+                           min_prods_per_firm=2, max_prods_per_firm=4):
+    """
+    Generate static graphs: product-product, firm-product, firm-firm.
+    """
+    np.random.seed(seed)
+    # get product graph
+    prod_graph = pd.read_table(os.path.join(DATA_DIR, 'product_graph.psv'), sep="|")
+    prod_graph['units'] = np.random.randint(low=min_units, high=max_units+1, size=len(prod_graph))  # add units per source, dest
+    G = nx.DiGraph()
+    edges = list(zip(prod_graph.source.values, prod_graph.dest.values))
+    G.add_edges_from(edges)
+    assert len(list(nx.simple_cycles(G))) == 0  # check for cycles, there should be none
+    products = list(nx.topological_sort(G))  # topological order
+    
+    # assign firms to the products that they supply
+    firms = [f'firm{i}' for i in range(num_firms)] 
+    firm2prods = {}  # firm to products supplied
+    prod2firms = {p:[] for p in products}  # product to supplier firms
+    for f in firms:
+        num_prods = np.random.randint(min_prods_per_firm, max_prods_per_firm+1)
+        supply_prods = np.random.choice(products, size=num_prods, replace=False)
+        firm2prods[f] = supply_prods
+        for p in supply_prods:
+            prod2firms[p].append(f)
+    assert all([len(firms) > 0 for firms in prod2firms.values()])  # all prods should have at least one supplier firm
+    
+    # assign supplier firms for each firm, based on products supplied 
+    inputs2supplier = {}  # (buyer firm, product) to supplier firm
+    for f in firms:
+        # all inputs needed for the products supplied by f
+        inputs_needed = prod_graph[prod_graph['dest'].isin(firm2prods[f])].source.unique()
+        for p in inputs_needed:
+            supplier = np.random.choice(prod2firms[p])
+            inputs2supplier[(f, p)] = supplier
+    
+    return firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier
+    
+
+def generate_initial_conditions(firms, products, firm2idx, prod2idx, prod_graph, prod2firms, 
+                                init_inv=0, init_supply=100, init_demand=1):
+    """
+    Generate initial conditions for simulation. No need for seed because deterministic.
+    """
+    # initialize inventories
+    inventories = np.ones((len(firms), len(products))) * init_inv
+    
+    # initialize supply for exogenous products
+    exog_prods = set(prod_graph.source.values) - set(prod_graph.dest.values)  # exogenous products, has no inputs
+    assert sorted(exog_prods) == sorted(products[:len(exog_prods)])
+    exog_supp = {}  # maps (firm, product) to supply
+    for p in exog_prods:
+        for f in prod2firms[p]:
+            exog_supp[(f,p)] = init_supply  # start with steady supply of exogeneous products
+    
+    # initialize demand for consumer products
+    curr_orders = np.zeros((len(firms)+1, len(firms), len(products)))  # buyer, supplier, product; entry is amount
+    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
+    assert sorted(consumer_prods) == sorted(products[-len(consumer_prods):])
+    for p in consumer_prods:
+        for f in prod2firms[p]:
+            curr_orders[len(firms), firm2idx[f], prod2idx[p]] = init_demand  # start with steady demand for consumer products
+            
+    return inventories, curr_orders, exog_supp
+    
+    
+def generate_demand_schedule(num_timesteps, prod_graph, prod2firms, seed=0):
+    """
+    Generate demand schedule for consumer products.
+    """
+    np.random.seed(seed)
+    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
+    prod_types = []
+    num_weeks = np.ceil(num_timesteps / 7)
+    demand_schedule = {}  # (firm, product, time) -> consumer demand
+    for i, p in enumerate(consumer_prods):
+        # get total demand per t
+        prod_type = ['weekend', 'weekday', 'uniform'][i % 3]  # iterate through these options
+        if prod_type == 'weekend':
+            demand = np.repeat([10, 10, 2, 2, 2, 2, 2], num_weeks)[:num_timesteps]
+        elif prod_type == 'weekday':
+            demand = np.repeat([2, 2, 10, 10, 10, 10, 10], num_weeks)[:num_timesteps]
+        else:
+            demand = np.ones(num_timesteps) * 5
+        prod_types.append(prod_type)
+        
+        # assign demand to suppliers
+        supplier_firms = prod2firms[p]
+        pvals = np.ones(len(supplier_firms)) / len(supplier_firms)  # each supplier is equally likely
+        for t, d in enumerate(demand):
+            counts = np.random.multinomial(d, pvals)
+            for s, ct in zip(supplier_firms, counts):
+                demand_schedule[(s, p, t)] = ct
+    print('Finished generating demand schedule:', Counter(prod_types))
+    return demand_schedule
+    
+    
+def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  # time-varying info
+                          firms, products, firm2idx, prod2idx,  # nodes + indexing
+                          prod_graph, firm2prods, prod2firms, inputs2supplier,  # static graphs
+                          demand_schedule=None, num_decimals=5, debug=False):
+    """
+    Generate transactions using agent-based model to determine firm's actions per timestep.
+    No need for seed because deterministic.
+    """
+    all_transactions = []
+    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
+    for t in range(num_timesteps):
+        transactions_t = []
+        future_inputs_needed = np.zeros(inventories.shape)  # n_firms x n_products
+        # should be order-invariant: a firm's actions at time t shouldn't be affected by other firms' actions
+        # firm's actions depend of its inventory and orders *to* the firm
+        # to test order invariance, try:
+#         rand_order = np.random.choice(len(firms), replace=False, size=len(firms))
+#         print(np.array(firms)[rand_order][:10])
+#         for f in np.array(firms)[rand_order]:  
+        for f in firms:
+            inventories, curr_orders, transactions_completed, inputs_needed = simulate_actions_for_firm(
+                f, inventories, curr_orders, exog_supp, firms, products, firm2idx, prod2idx, prod_graph, firm2prods, 
+                prod2firms, inputs2supplier, debug=debug)
+            transactions_t += transactions_completed
+            future_inputs_needed[firm2idx[f]] = inputs_needed
+            
+        # update firms' inventories (add to buyers) based on completed transactions, record transactions
+        if len(transactions_t) > 0:
+            s_idxs, b_idxs, p_idxs, amts = list(zip(*transactions_t))
+            inventories += csr_matrix((amts, (b_idxs, p_idxs)), shape=inventories.shape).toarray()
+            transactions_df = pd.DataFrame(transactions_t, columns=['supplier_id', 'buyer_id', 'product_id', 'amount'])
+            transactions_df['time'] = t
+            all_transactions.append(transactions_df)
+        
+        # make new orders based on inventories and future inputs needed
+        future_inputs_needed = np.clip(future_inputs_needed - inventories, 0, None)  # what is still needed
+        b_idxs, p_idxs = np.nonzero(future_inputs_needed)
+        for b_idx, p_idx in zip(b_idxs, p_idxs):
+            s_idx = firm2idx[inputs2supplier[(firms[b_idx], products[p_idx])]]
+            curr_orders[b_idx, s_idx, p_idx] = max(curr_orders[b_idx, s_idx, p_idx], future_inputs_needed[b_idx, p_idx])
+        
+        # add new demand from consumers
+        if demand_schedule is not None:
+            for p in consumer_prods:
+                for f in prod2firms[p]:
+                    demand = demand_schedule[t] if t in demand_schedule else demand_schedule[(f, p, t)]
+                    curr_orders[len(firms), firm2idx[f], prod2idx[p]] += demand
+        
+        # avoid rounding errors
+        inventories = np.round(inventories, num_decimals)
+        curr_orders = np.round(curr_orders, num_decimals)
+        num_orders = len(np.nonzero(curr_orders)[0])
+        print(f't={t}: generated {len(transactions_t)} transactions, {num_orders} current orders')
+        # print_curr_orders(curr_orders, firms, products)
+        if num_orders == 0:
+            print('No remaining orders, ending simulation')
+            break
+        
+    all_transactions = pd.concat(all_transactions)
+    return all_transactions
+        
+
+def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-varying info
+                              firms, products, firm2idx, prod2idx,  # nodes + indexing
+                              prod_graph, firm2prods, prod2firms, inputs2supplier,  # static graphs
+                              debug=False):
+    """
+    Simulate actions for a given firm f following agent-based model. No need for seed because deterministic.
+    Inputs:
+        f: name of firm
+        inventories: firm x product, shape: (n_firms x n_products)
+        curr_orders: buyer x supplier x product, shape: (n_firms+1 x n_firms x n_products); 
+                     the +1 is to represent consumer as buyer
+        exog_supp: current supply per (firm, product) for all exogenous products
+    
+    Returns:
+        inventories: same shape as before, modified with f's consumption subtracted
+        curr_orders: same shape as before, modified with orders *to* f subtracted
+        transactions_completed: transactions completed by f, where firm is suppler; list of 
+                                (supplier_id, buyer_id, product_id, amount)
+        inputs_needed: inputs needed to fulfill f's unfinished orders; shape: (n_products)
+    """    
+    inventories = inventories.copy()  # copy bc it'll be modified
+    curr_orders = curr_orders.copy()  # copy bc it'll be modified
+    transactions_completed = []  # list of (supplier_id, buyer_id, product_id, amount)
+    inputs_needed = np.zeros(len(products))
+    f_idx = firm2idx[f]
+    for p in firm2prods[f]:  # use order from earlier product sampling; order matters bc inventory is changed
+        if debug: 
+            print('Processing', p)
+        p_idx = prod2idx[p]
+        if np.sum(curr_orders[:, f_idx, p_idx]) == 0:
+            if debug:
+                print('No orders for firm+product, skipping')
+        else:
+            if debug:
+                print('Before processing...')
+                print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs_needed, firms, products)
+            
+            # get maximum amount of p that f could make
+            inputs_p = prod_graph[prod_graph['dest'] == p]
+            input2units = dict(zip(inputs_p.source, inputs_p.units))
+            if debug: 
+                print('inputs for product', input2units)
+            if len(input2units) == 0:  # exogenous
+                p_max = exog_supp[(f, p)]
+            else:
+                p_max = []
+                for s, units in input2units.items():
+                    p_max.append(inventories[f_idx, prod2idx[s]]/units)
+                    if debug: 
+                        print(f'Based on {s}, could make {p_max[-1]:.2f} of {p}')
+                p_max = np.min(p_max)
+
+            # produce output, subtract from inventory
+            fp_orders = curr_orders[:, f_idx, p_idx]
+            p_ordered = np.sum(fp_orders)  # total amount ordered
+            p_out = min(p_ordered, p_max)  # min of amount ordered and max amount f could produce
+            if debug: 
+                print(f'Amount ordered: {p_ordered:.2f}; Amount made: {p_out:.2f}')
+            for s, units in input2units.items():
+                inventories[f_idx, prod2idx[s]] -= p_out * units
+
+            # allocate output to buyers, subtract from orders to f
+            allocated_per_buyer = p_out * (fp_orders / np.sum(fp_orders))  # proportional
+            for b_idx in np.nonzero(allocated_per_buyer)[0]:
+                if b_idx < len(firms):  # otherwise, indicates consumer demand
+                    transactions_completed.append((f_idx, b_idx, p_idx, allocated_per_buyer[b_idx]))
+                curr_orders[b_idx, f_idx, p_idx] -= allocated_per_buyer[b_idx]
+
+            # record what inputs are still needed for unfulfilled orders
+            remaining = np.sum(curr_orders[:, f_idx, p_idx])
+            for s, units in input2units.items():
+                inputs_needed[prod2idx[s]] += remaining * units
+                
+            if debug: 
+                print('After processing...')
+                print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs_needed, firms, products)
+    return inventories, curr_orders, transactions_completed, inputs_needed
+
+
+###################################################
+# Helper functions
+###################################################
+def get_supply_chain_for_product(prod, prod_graph):
+    """
+    Get supply chain for a given product (ie, backwards BFS).
+    """
+    curr_layer = {prod}
+    next_layer = set()
+    seen = set()
+    layers = []
+    while len(curr_layer) > 0:
+        layers.append(curr_layer)
+        for p in curr_layer:
+            parents = prod_graph[prod_graph['dest'] == p].source.values
+            next_layer = next_layer.union(set(parents) - seen)
+            seen.add(p)
+        curr_layer = next_layer
+        next_layer = set()
+    return layers
+
+
+def print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs_needed, firms, products):
+    """
+    Helper function to print status for a given firm and product. Used during debgging.
+    """
+    curr_inv = inventories[f_idx]  # length n_products
+    dict_curr_inv = {products[p_idx]:curr_inv[p_idx] for p_idx in np.nonzero(curr_inv)[0]}
+    print('firm inventory', dict_curr_inv)
+    
+    orders_to_f = curr_orders[:, f_idx, p_idx]  # length n_firms+1
+    dict_orders_to_f = {}
+    for b_idx in np.nonzero(orders_to_f)[0]:
+        buyer = firms[b_idx] if b_idx < len(firms) else 'consumer'
+        dict_orders_to_f[buyer] = orders_to_f[b_idx]
+    print('orders for firm+product', dict_orders_to_f)
+    
+    dict_inputs_needed = {products[s_idx]:inputs_needed[s_idx] for s_idx in np.nonzero(inputs_needed)[0]}
+    print('inputs needed by firm', dict_inputs_needed)
+    
+    
+def print_curr_orders(curr_orders, firms, products, max_print=10):
+    """
+    Helper function to print current orders.
+    """
+    buyer_idx, supplier_idx, prod_idx = np.nonzero(curr_orders)
+    for b, s, p in zip(buyer_idx[:max_print], supplier_idx[:max_print], prod_idx[:max_print]):
+        buyer = firms[b] if b < len(firms) else 'consumer'
+        print(f'{buyer} ordered {curr_orders[b,s,p]:.5f} of {products[p]} from {firms[s]}')
+    print()
+    
+
+###################################################
+# Functions to visualize / evaluate on synthetic data
+###################################################
+def convert_txns_to_timeseries(txns_df, min_t, max_t):
+    """
+    Convert a dataframe of transactions to a time series.
+    """
+    sums_per_t = txns_df.groupby('time')['amount'].sum()
+    ts = []
+    for t in range(min_t, max_t+1):
+        if t in sums_per_t.index:
+            ts.append(sums_per_t.loc[t])
+        else:
+            ts.append(0)
+    return ts
+
+def get_temporal_corr(buy_ts, supp_ts, lag=0, corr_func=pearsonr):
+    """
+    Get correlation between timeseries for buying a product vs supplying 
+    another product, with possible lag between buying and supplying.
+    """
+    if lag > 0:
+        lagged_buy_ts = buy_ts[:len(buy_ts)-lag]
+        lagged_supp_ts = supp_ts[lag:]
+    else:
+        lagged_buy_ts = buy_ts
+        lagged_supp_ts = supp_ts
+    assert len(lagged_buy_ts) == len(lagged_supp_ts)
+    return corr_func(lagged_buy_ts, lagged_supp_ts)
+
+def get_best_corr_with_lag(buy_ts, supp_ts, max_lag=7):
+    """
+    Get best correlation between timeseries for buying a product vs supplying 
+    another product, using the best possible lag between buying and supplying.
+    """
+    best_corr = -1
+    best_lag = -1
+    for lag in range(7):
+        r,p = get_temporal_corr(buy_ts, supp_ts, lag=lag, corr_func=pearsonr)
+        if r > best_corr:
+            best_corr = r
+            best_lag = lag
+    return best_corr, best_lag
+
+def eval_timeseries_for_product(prod, transactions, firms, products, firm2idx, prod2idx,
+                                prod_graph, firm2prods, prod2firms):
+    """
+    For a given product, iterate through its suppliers and plot time series of supplying this product vs
+    buying other products, including its true parts. Evaluate correlation between time series.
+    """
+    p_idx = prod2idx[prod]
+    true_sources = sorted(prod_graph[prod_graph['dest'] == prod]['source'].values)
+    if len(true_sources) == 0:
+        print('This is an exogenous product, no inputs to evaluate')
+        return
+    src2dests = {}
+    num_layers = []
+    for src in true_sources:
+        src2dests[src] = set(prod_graph[prod_graph['source'] == src].dest.values)
+        layers = get_supply_chain_for_product(src, prod_graph)
+        num_layers.append(len(layers))
+    assert len(set(num_layers)) == 1  # should all be the same layer, by construction
+    print(f'True sources (layer {num_layers[0]}):', true_sources)
+    
+    # compare supply time series and buy time series per supplier
+    conditions2corrs = {}
+    min_t = np.min(transactions.time.values)
+    max_t = np.max(transactions.time.values)
+    time_range = range(min_t, max_t+1)
+    for s in prod2firms[prod]:
+        s_idx = firm2idx[s]
+        print(f'SUPPLIER: {s}')
+        supp_df = transactions[transactions['supplier_id'] == s_idx]  # all txns where s is supplying
+        if p_idx in supp_df.product_id.values:
+            all_prods_supplied = {products[p_idx] for p_idx in supp_df['product_id'].unique()}
+            buy_df = transactions[transactions['buyer_id'] == s_idx]  # all txns where s is buying
+            all_prods_bought = {products[p_idx] for p_idx in buy_df['product_id'].unique()}
+            
+            fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+            fig.suptitle(s, fontsize=12)
+            # plot time series
+            ax = axes[0]
+            supp_ts = convert_txns_to_timeseries(supp_df[supp_df['product_id'] == p_idx], min_t, max_t)
+            ax.plot(time_range, supp_ts, label=f'supply {prod}')
+            pos_corrs = []
+            for src in true_sources:
+                buy_ts = convert_txns_to_timeseries(buy_df[buy_df['product_id'] == prod2idx[src]], min_t, max_t)
+                ax.plot(time_range, buy_ts, label=f'buy {src}')
+                best_corr, best_lag = get_best_corr_with_lag(buy_ts, supp_ts)
+                pos_corrs.append(best_corr)
+                dest_prods_supplied_by_s = all_prods_supplied.intersection(src2dests[src])
+                print(f'src={src}: best corr = {best_corr:.3f}, lag = {best_lag}; input to {len(dest_prods_supplied_by_s)} product(s) supplied by firm')
+                conds = (len(true_sources), num_layers[0], len(dest_prods_supplied_by_s))
+                conditions2corrs[conds] = conditions2corrs.get(conds, []) + [best_corr]
+            ax.legend()
+
+            # plot correlations
+            other_prods_bought = all_prods_bought - set(true_sources)
+            neg_corrs = []
+            if len(other_prods_bought) > 0: 
+                print(f'Found {len(other_prods_bought)} OTHER products bought by {s}')
+                for b in other_prods_bought:
+                    buy_ts = convert_txns_to_timeseries(buy_df[buy_df['product_id'] == prod2idx[b]], min_t, max_t)
+                    best_corr, best_lag = get_best_corr_with_lag(buy_ts, supp_ts)
+                    neg_corrs.append(best_corr)
+            ax = axes[1]
+            ax.hist(neg_corrs, color='blue', bins=20)
+            ymin, ymax = ax.get_ylim()
+            ax.vlines(pos_corrs, ymin, ymax, color='red')
+            plt.show()            
+        else:
+            print(f'Never supplied {prod} in transactions; skipping')
+    return conditions2corrs
+
+
+def predict_product_relations_with_corr(transactions, products):
+    """
+    Create matrix of predicted relationships between products based on temporal correlation.
+    """
+    min_t = np.min(transactions.time.values)
+    max_t = np.max(transactions.time.values)
+    m = np.zeros((len(products), len(products)))
+    for p_idx in range(len(products)):
+        prod_txns = transactions[transactions['product_id'] == p_idx]  
+        if len(prod_txns) > 0:  # should be 0 for consumer products
+            candidates = {}
+            for s_idx, supp_df in prod_txns.groupby('supplier_id'):  # iterate through suppliers
+                supp_ts = convert_txns_to_timeseries(supp_df, min_t, max_t)
+                buy_df = transactions[transactions['buyer_id'] == s_idx]  # all txns where s is buying
+                for b_idx, buy_df_s in buy_df.groupby('product_id'):  # group by products bought
+                    buy_ts = convert_txns_to_timeseries(buy_df, min_t, max_t)
+                    best_corr, best_lag = get_best_corr_with_lag(buy_ts, supp_ts)
+                    candidates[b_idx] = candidates.get(b_idx, []) + [best_corr]
+            for b_idx, corrs in candidates.items():
+                m[p_idx, b_idx] = np.mean(corrs)
+    return m
+
+def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=True):
+    """
+    Compute mean average precision over products.
+    """
+    avg_prec_per_prod = []
+    for p, p_idx in prod2idx.items():
+        inputs = [prod2idx[s] for s in prod_graph[prod_graph['dest'] == p].source.values]
+        is_consumer_prod = len(prod_graph[prod_graph['source'] == p]) == 0
+        if len(inputs) > 0:
+            ranking = list(np.argsort(-pred_mat[p_idx]))
+            total = 0
+            for s_idx in inputs:
+                k = ranking.index(s_idx)+1  # rank and index are off-by-one
+                prec_at_k = np.mean(np.isin(ranking[:k], inputs))  # how many of top k are true inputs
+                total += prec_at_k
+            avg_prec = total/len(inputs)
+            if verbose:
+                print(f'{p} (consumer prod: {is_consumer_prod}): avg precision={avg_prec:0.4f}')
+            avg_prec_per_prod.append(avg_prec)
+    return np.mean(avg_prec_per_prod)
