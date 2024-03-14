@@ -503,16 +503,22 @@ def predict_product_relations_with_corr(transactions, products):
 
 
 def predict_product_relations_with_inventory_module(transactions, firms, products, prod2idx, prod_graph, 
-                                                    init_m=None, num_epochs=50, visualize_weights=True):
+                                                    debt_penalty=None, consumption_reward=None,
+                                                    init_weights=None, num_epochs=50, patience=5, 
+                                                    show_weights=True):
     """
     Train inventory module with direct attention on synthetic data, return learned 
     """
     # initialize inventory module
     device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
-    module = TGNPLInventory(len(firms), len(products), learn_att_direct=True, device=device)
-    if init_m is not None:  # set initial weights of inventory module
-        assert init_m.shape == (len(products), len(products))
-        module.att_weights.data = torch.Tensor(init_m).to(device)
+    module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True,
+            'device': device}
+    if debt_penalty is not None and consumption_reward is not None:
+        module_args['debt_penalty'] = debt_penalty
+        module_args['consumption_reward'] = consumption_reward
+    if init_weights is not None:
+        module_args['init_weights'] = init_weights
+    module = TGNPLInventory(**module_args)        
         
     opt = torch.optim.Adam(module.parameters())
     # train inventory module
@@ -533,13 +539,13 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
             loss.backward(retain_graph=False)
             opt.step()
             module.detach()
-            losses.append(float(loss))
+            losses.append((float(loss), float(debt_loss), float(cons_loss)))
             
         weights = module._get_prod_attention().cpu().detach().numpy()
         mean_avg_pr = mean_average_precision(prod_graph, prod2idx, weights, verbose=False)
         maps.append(mean_avg_pr)
-
-        if visualize_weights and (ep % 5) == 0:
+        
+        if show_weights and (ep % 5) == 0:
             pos = plt.imshow(weights)
             plt.colorbar(pos)
             plt.title('Ep %d' % ep)
@@ -570,14 +576,41 @@ def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=True):
     return np.mean(avg_prec_per_prod)
 
 
-if __name__ == "__main__":
+def gridsearch_on_hyperparameters():
     with open('./synthetic_data.pkl', 'rb') as f:
         firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier, demand_schedule = pickle.load(f)
     prod2idx = {p:i for i,p in enumerate(products)}
     
-    # summarize results with multiple runs
-    settings = ['all_transactions', '08_transactions', '05_transactions', '09_firms', '07_firms']
-    for setting in settings:
+    transactions = pd.read_csv(f'./standard_setting_all_transactions.csv')
+    print(f'Loaded all transactions -> {len(transactions)} transactions')
+    corr_m = predict_product_relations_with_corr(transactions, products)
+    corr_map = mean_average_precision(prod_graph, prod2idx, corr_m, verbose=False)
+    print(f'Temporal correlations: MAP={corr_map:.4f}')
+        
+    debt_penalty = 10
+    for scaling in np.arange(0.1, 1.1, 0.1):
+        consumption_reward = debt_penalty * scaling
+        losses, maps, inv_m = predict_product_relations_with_inventory_module(
+            transactions, firms, products, prod2idx, prod_graph, init_weights=corr_m, 
+            debt_penalty=debt_penalty, consumption_reward=consumption_reward, 
+            show_weights=False)
+        print(f'Debt penalty = {debt_penalty}, scaling = {scaling} -> final MAP={maps[-1]:0.4f}, best MAP={np.max(maps):0.4f}')
+        print('Last 5 MAPs:', np.round(maps[-5:], 3))
+        print()
+            
+    
+def compare_methods_across_standard_data_settings(data_settings, num_rand_inits=10, 
+                                                  debt_penalty=None, consumption_reward=None):
+    """
+    Evaluate production learning methods on standard synthetic data with different settings:
+    varying amounts of missingness in transactions, varying amounts of missingness in firms.
+    """
+    with open('./synthetic_data.pkl', 'rb') as f:
+        firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier, demand_schedule = pickle.load(f)
+    prod2idx = {p:i for i,p in enumerate(products)}
+    
+    print(f'For all experiments, using debt_penalty={debt_penalty} and consumption_reward={consumption_reward}')
+    for setting in data_settings:
         transactions = pd.read_csv(f'./standard_setting_{setting}.csv')
         print(f'Setting: {setting} -> {len(transactions)} transactions')
 
@@ -585,16 +618,28 @@ if __name__ == "__main__":
         corr_map = mean_average_precision(prod_graph, prod2idx, corr_m, verbose=False)
         print(f'Temporal correlations: MAP={corr_map:.4f}')
         
+        # when inventory module is randomly initialized
         final_maps = []
-        for i in range(10):
+        for i in range(num_rand_inits):
             torch.manual_seed(i)
             losses, maps, inv_m = predict_product_relations_with_inventory_module(
-                transactions, firms, products, prod2idx, prod_graph, visualize_weights=False)
+                transactions, firms, products, prod2idx, prod_graph, 
+                debt_penalty=debt_penalty, consumption_reward=consumption_reward,
+                show_weights=False)
             print(i, f'Inventory module: final MAP={maps[-1]:0.4f}, best MAP={np.max(maps):0.4f}')
             final_maps.append(maps[-1])
         print(f'Inventory module: mean MAP={np.mean(final_maps):0.4f}, std MAP={np.std(final_maps):0.4f}')
         
         # no randomness, only need to run once
         losses, maps, inv_m = predict_product_relations_with_inventory_module(
-                transactions, firms, products, prod2idx, prod_graph, init_m=corr_m, visualize_weights=False)
-        print(i, f'Inventory module, init with corr: final MAP={maps[-1]:0.4f}, best MAP={np.max(maps):0.4f}')
+                transactions, firms, products, prod2idx, prod_graph, init_weights=corr_m, 
+                debt_penalty=debt_penalty, consumption_reward=consumption_reward, 
+                show_weights=False)
+        print(f'Inventory module, init with corr: final MAP={maps[-1]:0.4f}, best MAP={np.max(maps):0.4f}')
+
+        
+if __name__ == "__main__":    
+    # summarize results with multiple runs
+    settings = ['all_transactions', '08_transactions', '05_transactions', '09_firms', '07_firms']
+    compare_methods_across_standard_data_settings(settings, debt_penalty=10, consumption_reward=7)
+    # gridsearch_on_hyperparameters()

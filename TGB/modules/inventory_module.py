@@ -14,6 +14,7 @@ class TGNPLInventory(torch.nn.Module):
         consumption_reward : float = 1.0,
         device = None,
         learn_att_direct: bool = False,
+        init_weights = None,
         emb_dim : int = 0,
     ):
         super().__init__()
@@ -28,11 +29,15 @@ class TGNPLInventory(torch.nn.Module):
         self.device = device
             
         self.reset()
-        if self.learn_att_direct:
-            # learn attention weights directly 
-            self.att_weights = Parameter(torch.rand(size=(self.num_prods, self.num_prods), requires_grad=True, device=device))
-        else:
-            # learn attention weights using product embeddings
+        if self.learn_att_direct:  # learn attention weights directly  
+            if init_weights is None:
+                init_weights = torch.rand(size=(self.num_prods, self.num_prods), requires_grad=True, device=device)
+            else:  # initial weights provided, eg, from correlations
+                assert init_weights.shape == (self.num_prods, self.num_prods)
+                init_weights = torch.Tensor(init_weights).to(device)
+            self.att_weights = Parameter(init_weights)
+        else:  # learn attention weights using product embeddings
+            assert init_weights is None
             self.prod_bilinear = Parameter(torch.rand(size=(self.emb_dim, self.emb_dim), requires_grad=True, device=device))
                 
     
