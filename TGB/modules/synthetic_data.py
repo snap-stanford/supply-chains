@@ -97,15 +97,15 @@ def generate_demand_schedule(num_timesteps, prod_graph, prod2firms, seed=0):
     np.random.seed(seed)
     consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
     prod_types = []
-    num_weeks = np.ceil(num_timesteps / 7)
+    num_weeks = int(np.ceil(num_timesteps / 7))
     demand_schedule = {}  # (firm, product, time) -> consumer demand
     for i, p in enumerate(consumer_prods):
         # get total demand per t
         prod_type = ['weekend', 'weekday', 'uniform'][i % 3]  # iterate through these options
         if prod_type == 'weekend':
-            demand = np.repeat([10, 10, 2, 2, 2, 2, 2], num_weeks)[:num_timesteps]
+            demand = np.tile([10, 10, 2, 2, 2, 2, 2], num_weeks)[:num_timesteps]
         elif prod_type == 'weekday':
-            demand = np.repeat([2, 2, 10, 10, 10, 10, 10], num_weeks)[:num_timesteps]
+            demand = np.tile([2, 2, 10, 10, 10, 10, 10], num_weeks)[:num_timesteps]
         else:
             demand = np.ones(num_timesteps) * 5
         prod_types.append(prod_type)
@@ -211,7 +211,7 @@ def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-va
     transactions_completed = []  # list of (supplier_id, buyer_id, product_id, amount)
     inputs_needed = np.zeros(len(products))
     f_idx = firm2idx[f]
-    for p in firm2prods[f]:  # use order from earlier product sampling; order matters bc inventory is changed
+    for p in firm2prods[f]:  # order matters here because inventory changes
         if debug: 
             print('Processing', p)
         p_idx = prod2idx[p]
@@ -476,8 +476,7 @@ def eval_timeseries_for_product(prod, transactions, firms, products, firm2idx, p
 
 
 ###################################################
-# Functions to evaluate against ground-truth
-# production functions
+# Functions to evaluate against ground-truth production functions
 ###################################################
 def predict_product_relations_with_corr(transactions, products):
     """
@@ -507,20 +506,20 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
                                                     init_weights=None, num_epochs=50, patience=5, 
                                                     show_weights=True):
     """
-    Train inventory module with direct attention on synthetic data, return learned 
+    Train inventory module with direct attention on synthetic data, return final attention weights.
     """
     # initialize inventory module
     device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
     module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True,
-            'device': device}
+                   'device': device}
     if debt_penalty is not None and consumption_reward is not None:
         module_args['debt_penalty'] = debt_penalty
         module_args['consumption_reward'] = consumption_reward
     if init_weights is not None:
         module_args['init_weights'] = init_weights
-    module = TGNPLInventory(**module_args)        
-        
+    module = TGNPLInventory(**module_args)                
     opt = torch.optim.Adam(module.parameters())
+    
     # train inventory module
     losses = []
     maps = []
@@ -542,31 +541,32 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
             losses.append((float(loss), float(debt_loss), float(cons_loss)))
             
         weights = module._get_prod_attention().cpu().detach().numpy()
-        mean_avg_pr = mean_average_precision(prod_graph, prod2idx, weights, verbose=False)
+        mean_avg_pr = mean_average_precision(prod_graph, prod2idx, weights)
         maps.append(mean_avg_pr)
         
         if show_weights and (ep % 5) == 0:
             pos = plt.imshow(weights)
             plt.colorbar(pos)
-            plt.title('Ep %d' % ep)
+            plt.title(f'Ep {ep}')
             plt.show()
         module.reset()  # reset inventory
     return losses, maps, weights
 
     
-def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=True):
+def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=False):
     """
-    Compute mean average precision over products.
+    Compute mean average precision over products, given a prediction matrix where rows are products
+    and columns are their predicted inputs.
     """
     avg_prec_per_prod = []
     for p, p_idx in prod2idx.items():
-        inputs = [prod2idx[s] for s in prod_graph[prod_graph['dest'] == p].source.values]
-        is_consumer_prod = len(prod_graph[prod_graph['source'] == p]) == 0
-        if len(inputs) > 0:
+        inputs = [prod2idx[s] for s in prod_graph[prod_graph['dest'] == p].source.values]  # true inputs
+        is_consumer_prod = len(prod_graph[prod_graph['source'] == p]) == 0  
+        if len(inputs) > 0:  # skip exogenous products since they have no inputs
             ranking = list(np.argsort(-pred_mat[p_idx]))
             total = 0
             for s_idx in inputs:
-                k = ranking.index(s_idx)+1  # rank and index are off-by-one
+                k = ranking.index(s_idx)+1  # get the rank of input s_idx; rank and index are off-by-one
                 prec_at_k = np.mean(np.isin(ranking[:k], inputs))  # how many of top k are true inputs
                 total += prec_at_k
             avg_prec = total/len(inputs)
@@ -577,6 +577,9 @@ def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=True):
 
 
 def gridsearch_on_hyperparameters():
+    """
+    Gridsearch over scaling between debt penalty vs consumption reward.
+    """
     with open('./synthetic_data.pkl', 'rb') as f:
         firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier, demand_schedule = pickle.load(f)
     prod2idx = {p:i for i,p in enumerate(products)}
@@ -584,7 +587,7 @@ def gridsearch_on_hyperparameters():
     transactions = pd.read_csv(f'./standard_setting_all_transactions.csv')
     print(f'Loaded all transactions -> {len(transactions)} transactions')
     corr_m = predict_product_relations_with_corr(transactions, products)
-    corr_map = mean_average_precision(prod_graph, prod2idx, corr_m, verbose=False)
+    corr_map = mean_average_precision(prod_graph, prod2idx, corr_m)
     print(f'Temporal correlations: MAP={corr_map:.4f}')
         
     debt_penalty = 10
@@ -615,7 +618,7 @@ def compare_methods_across_standard_data_settings(data_settings, num_rand_inits=
         print(f'Setting: {setting} -> {len(transactions)} transactions')
 
         corr_m = predict_product_relations_with_corr(transactions, products)
-        corr_map = mean_average_precision(prod_graph, prod2idx, corr_m, verbose=False)
+        corr_map = mean_average_precision(prod_graph, prod2idx, corr_m)
         print(f'Temporal correlations: MAP={corr_map:.4f}')
         
         # when inventory module is randomly initialized
@@ -641,5 +644,5 @@ def compare_methods_across_standard_data_settings(data_settings, num_rand_inits=
 if __name__ == "__main__":    
     # summarize results with multiple runs
     settings = ['all_transactions', '08_transactions', '05_transactions', '09_firms', '07_firms']
-    compare_methods_across_standard_data_settings(settings, debt_penalty=10, consumption_reward=7)
+    compare_methods_across_standard_data_settings(settings, debt_penalty=10, consumption_reward=1)
     # gridsearch_on_hyperparameters()
