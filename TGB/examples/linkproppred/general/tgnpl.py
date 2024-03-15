@@ -700,7 +700,7 @@ def run_experiment(args):
                     results_filename, replace_file=True)
 
             # check if best on val so far, save if so, stop if no improvement observed for a while
-            if early_stopper.step_check(perf_metric_val, model | {"neighbor_loader": neighbor_loader}): # DEBUG: save neighbor loader in another way
+            if early_stopper.step_check(perf_metric_val, model):
                 break
                 
         # also save final model
@@ -708,9 +708,8 @@ def run_experiment(args):
         print("INFO: save final model to {}".format(model_path))
         model_names = list(model.keys())
         model_components = list(model.values())
-        torch.save({model_names[i]: model_components[i].state_dict() for i in range(len(model_names))} 
-                   | {"neighbor_loader": neighbor_loader}, # DEBUG: save neighbor loader in another way
-                    model_path)
+        torch.save({model_names[i]: model_components[i].state_dict() for i in range(len(model_names))}, 
+                   model_path)
 
         train_val_time = timeit.default_timer() - start_train_val
         print(f"Train & Validation: Elapsed Time (s): {train_val_time: .4f}")
