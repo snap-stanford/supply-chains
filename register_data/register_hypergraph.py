@@ -19,10 +19,11 @@ import multiprocessing as mp
 def get_args():
     #make these into argparse
     parser = argparse.ArgumentParser(description='Extracting graph data from the transactions in logistic_data')
+    parser.add_argument('dataset_name', help = "name to be assigned to dataset")
+    parser.add_argument('dir', help = "directory to save data")
+    parser.add_argument('--skip_process_csv', action='store_true', help = "if true, use already processed edgelist")
     parser.add_argument('--csv_file', nargs='?', default = "../hitachi-supply-chains/temporal_graph/storage/daily_transactions_2021.csv", help = "path to CSV file with transactions")
-    parser.add_argument('--dataset_name', nargs='?', default = "tgbl-supplychains", help = "name to be assigned to dataset")
     parser.add_argument('--metric', nargs='?', default = "total_amount", help = "either total amount (in USD), which is default, or weight")
-    parser.add_argument('--dir', nargs='?', default = "./tgb_data", help = "directory to save data")
     parser.add_argument('--logscale', action='store_true', help = "if true, apply logarithm to edge weights")
     parser.add_argument('--use_prev_sampling', action='store_true', help = "if true, use the hyperedge sampling approach prior to fixing loose negatives on Oct 24")
     parser.add_argument('--workers', nargs='?', default = 10, type = int, help = "number of thread workers")
@@ -377,8 +378,23 @@ def harness_negative_sampler(eval_ns_keys, split = "val", num_workers = 20, use_
 if __name__ == "__main__":
     args = get_args()
     
-    df, id2entity, product_min_id = process_csv(args.csv_file, args.metric, args.logscale, args.max_timestamp)
-    df.to_csv(os.path.join(args.dir, f"{args.dataset_name}_edgelist.csv"), index = False) #save out edgelist
+    edgelist_fn = os.path.join(args.dir, f'{args.dataset_name}_edgelist.csv')
+    meta_fn = os.path.join(args.dir, f'{args.dataset_name}_meta.json')
+    if args.skip_process_csv:  # edgelist and ID mapping processed externally
+        assert os.path.isfile(edgelist_fn)
+        assert os.path.isfile(meta_fn)
+        df = pd.read_csv(edgelist_fn)
+        expected_cols = ['ts', 'source', 'target', 'product', 'weight']
+        assert np.isin(expected_cols, df.columns).all()
+        with open(meta_fn, 'r') as f:
+            meta = json.load(f)
+        assert 'id2entity' in meta and 'product_threshold' in meta
+        id2entity = meta['id2entity']
+        product_min_id = meta['product_threshold']
+        assert (df['product'] >= product_min_id).all()
+    else:
+        df, id2entity, product_min_id = process_csv(args.csv_file, args.metric, args.logscale, args.max_timestamp)
+        df.to_csv(edgelist_fn, index = False)  # save edgelist
     num_nodes, num_firms, num_products = len(id2entity), product_min_id, len(id2entity) - product_min_id
     
     timestamps = sorted(list(df["ts"]))
@@ -430,7 +446,7 @@ if __name__ == "__main__":
     with open(os.path.join(args.dir, f'{args.dataset_name}_test_ns.pkl'), 'wb') as handle:
         pickle.dump(test_ns, handle, protocol=pickle.HIGHEST_PROTOCOL)
     
-    with open(os.path.join(args.dir, f'{args.dataset_name}_meta.json'),"w") as file:
+    with open(meta_fn, "w") as file:
         meta = {"product_threshold": product_min_id, "id2entity": id2entity,
                "train_max_ts": int(train_max_ts), "val_max_ts": int(val_max_ts), "test_max_ts": int(test_max_ts)}
         json.dump(meta, file, indent = 4)
