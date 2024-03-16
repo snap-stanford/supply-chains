@@ -22,14 +22,7 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPred
 
 from modules.hyper_edgebank import HyperEdgeBankPredictor
 
-    
-# ===========================================
-# == Functions to run complete experiments
-# ===========================================
 # Global variables
-MODEL_NAME = 'TGNPL'
-NUM_NEIGHBORS = 10
-#PATH_TO_DATASETS = f'/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
 TGB_DIRECTORY = "/".join(str(__file__).split("/")[:-4])
 PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
 
