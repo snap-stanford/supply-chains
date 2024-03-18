@@ -90,49 +90,103 @@ def generate_initial_conditions(firms, products, firm2idx, prod2idx, prod_graph,
     return inventories, curr_orders, exog_supp
     
     
-def generate_demand_schedule(num_timesteps, prod_graph, prod2firms, seed=0):
+def generate_demand_schedule(num_timesteps, prod_graph, prod2firms, seed=0, min_demand=0.5, init_demand=2):
     """
     Generate demand schedule for consumer products.
     """
     np.random.seed(seed)
-    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
-    prod_types = []
-    num_weeks = int(np.ceil(num_timesteps / 7))
-    demand_schedule = {}  # (firm, product, time) -> consumer demand
-    for i, p in enumerate(consumer_prods):
-        # get total demand per t
-        prod_type = ['weekend', 'weekday', 'uniform'][i % 3]  # iterate through these options
-        if prod_type == 'weekend':
-            demand = np.tile([10, 10, 2, 2, 2, 2, 2], num_weeks)[:num_timesteps]
-        elif prod_type == 'weekday':
-            demand = np.tile([2, 2, 10, 10, 10, 10, 10], num_weeks)[:num_timesteps]
-        else:
-            demand = np.ones(num_timesteps) * 5
-        prod_types.append(prod_type)
-        
-        # assign demand to suppliers
-        supplier_firms = prod2firms[p]
-        pvals = np.ones(len(supplier_firms)) / len(supplier_firms)  # each supplier is equally likely
-        for t, d in enumerate(demand):
-            counts = np.random.multinomial(d, pvals)
-            for s, ct in zip(supplier_firms, counts):
-                demand_schedule[(s, p, t)] = ct
-    print('Finished generating demand schedule:', Counter(prod_types))
+    consumer_prods = sorted(set(prod_graph.dest.values) - set(prod_graph.source.values))  # consumer products, not used as input
+    prod_types = ['weekend', 'weekday', 'uniform']
+    
+    prod2demand = {p:init_demand for p in consumer_prods}
+    demand_schedule = {}  # t -> (firm, product) -> demand
+    for t in range(num_timesteps):
+        demand_schedule_t = {}
+        for i, p in enumerate(consumer_prods):
+            prev_demand = prod2demand[p]
+            curr_demand = max(min_demand, prev_demand + np.random.normal(loc=0, scale=0.1))  # random drift
+            prod2demand[p] = curr_demand
+            
+            prod_type = prod_types[i%3]
+            if prod_type == 'uniform':  # same every day
+                demand = curr_demand
+            elif prod_type == 'weekday':  # higher on weekdays, lower on weekends
+                if (t%7) < 5:
+                    demand = curr_demand * 2
+                else:
+                    demand = curr_demand * 0.5
+            else:  # higher on weekends, lower on weekdays
+                if (t%7) < 5:
+                    demand = curr_demand * 0.5
+                else:
+                    demand = curr_demand * 2
+            
+            for f in prod2firms[p]:
+                fp_demand = np.random.poisson(demand)
+                demand_schedule_t[(f,p)] = fp_demand
+        demand_schedule[t] = demand_schedule_t
     return demand_schedule
+    
+
+def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, seed=0, 
+                                       default_supply=1000, shock_supply=10, shock_prob=0.001, 
+                                       shock_probs=None, recovery_rate=1.2):
+    """
+    Generate schedule of supply for exogenous products with possible shocks to supply.
+    """
+    np.random.seed(seed)
+    exog_prods = sorted(set(prod_graph.source.values) - set(prod_graph.dest.values))  # exog products, only used as input
+    expected_num_shocks = len(exog_prods) * num_timesteps * shock_prob
+    print(f'Found {len(exog_prods)} exogenous products -> expected num shocks = {expected_num_shocks:0.3f}')
+    # default_supply = shock_supply * recovery_rate^k 
+    # log default_supply = log shock_supply + k log recovery_rate
+    # (log default_supply - log shock_supply) / log recovery_rate = k
+    time_to_recovery = (np.log(default_supply) - np.log(shock_supply)) / np.log(recovery_rate)
+    print(f'Recovery rate = {recovery_rate} -> num timesteps to recovery = {time_to_recovery: 0.2f}')
+    
+    prod2supply = {p:default_supply for p in exog_prods}
+    exog_schedule = {}  # t -> (firm, product) -> supply
+    for t in range(num_timesteps):
+        exog_supp_t = {}
+        for p in exog_prods:
+            prev_supp = prod2supply[p]
+            prob = shock_prob if shock_probs is None else shock_probs[t]
+            if np.random.rand() < prob:   # shock occurred
+                print(f'Shock to {p} at time {t}')
+                curr_supp = shock_supply
+            elif prev_supp < default_supply:  # in recovery
+                curr_supp = min(default_supply, prev_supp*recovery_rate)
+            else:  # at default supply
+                assert prev_supp == default_supply
+                curr_supp = default_supply
+            prod2supply[p] = curr_supp
+            for f in prod2firms[p]:
+                fp_supp = np.random.poisson(curr_supp)
+                exog_supp_t[(f, p)] = fp_supp
+        exog_schedule[t] = exog_supp_t
+    return exog_schedule
     
     
 def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  # time-varying info
                           firms, products, firm2idx, prod2idx,  # nodes + indexing
                           prod_graph, firm2prods, prod2firms, inputs2supplier,  # static graphs
-                          demand_schedule=None, num_decimals=5, use_random_firm_order=False,
-                          seed=0, debug=False):
+                          exog_schedule=None, demand_schedule=None, use_random_firm_order=False, 
+                          num_decimals=5, seed=0, debug=False):
     """
     Generate transactions using agent-based model to determine firm's actions per timestep.
     """
     np.random.seed(seed)
     all_transactions = []
     consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
-    for t in range(num_timesteps):
+    for t in range(num_timesteps):      
+        # add new demand from consumers
+        if demand_schedule is not None:
+            demand_schedule_t = demand_schedule[t]
+            for p in consumer_prods:
+                for f in prod2firms[p]:
+                    curr_orders[len(firms), firm2idx[f], prod2idx[p]] += demand_schedule_t[(f,p)]
+        
+        # get new transactions at time t
         transactions_t = []
         future_inputs_needed = np.zeros(inventories.shape)  # n_firms x n_products
         # should be order-invariant: a firm's actions at time t shouldn't be affected by other firms' actions
@@ -144,8 +198,9 @@ def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  #
         else:
             firm_order = firms
         for f in firm_order:
+            exog_supp_t = exog_supp if exog_schedule is None else exog_schedule[t]  # supply of exog products at time t
             inventories, curr_orders, transactions_completed, inputs_needed = simulate_actions_for_firm(
-                f, inventories, curr_orders, exog_supp, firms, products, firm2idx, prod2idx, prod_graph, firm2prods, 
+                f, inventories, curr_orders, exog_supp_t, firms, products, firm2idx, prod2idx, prod_graph, firm2prods, 
                 prod2firms, inputs2supplier, debug=debug)
             transactions_t += transactions_completed
             future_inputs_needed[firm2idx[f]] = inputs_needed
@@ -164,14 +219,7 @@ def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  #
         for b_idx, p_idx in zip(b_idxs, p_idxs):
             s_idx = firm2idx[inputs2supplier[(firms[b_idx], products[p_idx])]]
             curr_orders[b_idx, s_idx, p_idx] = max(curr_orders[b_idx, s_idx, p_idx], future_inputs_needed[b_idx, p_idx])
-        
-        # add new demand from consumers
-        if demand_schedule is not None:
-            for p in consumer_prods:
-                for f in prod2firms[p]:
-                    demand = demand_schedule[t] if t in demand_schedule else demand_schedule[(f, p, t)]
-                    curr_orders[len(firms), firm2idx[f], prod2idx[p]] += demand
-        
+            
         # avoid rounding errors
         inventories = np.round(inventories, num_decimals)
         curr_orders = np.round(curr_orders, num_decimals)
