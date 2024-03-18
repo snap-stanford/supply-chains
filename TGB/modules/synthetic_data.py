@@ -63,8 +63,7 @@ def generate_static_graphs(max_firms, seed=0, min_units=1, max_units=4):
     return firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier
     
 
-def generate_initial_conditions(firms, products, firm2idx, prod2idx, prod_graph, prod2firms, 
-                                init_inv=0, init_supply=100, init_demand=1):
+def generate_initial_conditions(firms, products, prod_graph, prod2firms, init_inv=0, init_supply=100, init_demand=1):
     """
     Generate initial conditions for simulation. No need for seed because deterministic.
     """
@@ -80,12 +79,15 @@ def generate_initial_conditions(firms, products, firm2idx, prod2idx, prod_graph,
             exog_supp[(f,p)] = init_supply  # start with steady supply of exogeneous products
     
     # initialize demand for consumer products
-    curr_orders = np.zeros((len(firms)+1, len(firms), len(products)))  # buyer, supplier, product; entry is amount
     consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
     assert sorted(consumer_prods) == sorted(products[-len(consumer_prods):])
-    for p in consumer_prods:
+    curr_orders = {}  # maps (supplier, product) to list of orders as (buyer, amount)
+    for p in products:
         for f in prod2firms[p]:
-            curr_orders[len(firms), firm2idx[f], prod2idx[p]] = init_demand  # start with steady demand for consumer products
+            if p in consumer_prods and init_demand > 0:
+                curr_orders[(f,p)] = [('consumer', init_demand)]  # start with steady demand for consumer products
+            else:
+                curr_orders[(f,p)] = []
             
     return inventories, curr_orders, exog_supp
     
@@ -170,83 +172,91 @@ def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, se
 def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  # time-varying info
                           firms, products, firm2idx, prod2idx,  # nodes + indexing
                           prod_graph, firm2prods, prod2firms, inputs2supplier,  # static graphs
-                          exog_schedule=None, demand_schedule=None, use_random_firm_order=False, 
-                          num_decimals=5, seed=0, debug=False):
+                          exog_schedule=None, demand_schedule=None, num_decimals=5, seed=0, debug=False):
     """
     Generate transactions using agent-based model to determine firm's actions per timestep.
+    Inputs:
+        inventories: firm x product, shape: (n_firms x n_products)
+        curr_orders: dict of (supplier, product) -> list of (buyer, amount)
+        exog_supp: current supply per (firm, product) for all exogenous products
+        exog_schedule: dict of t -> supply per (firm, product) for all exogenous products
+        demand_schedule: dict of t -> demand per (firm, product) for all consumer products
+    
+    Returns:
+        transactions: a pd DataFrame of supplier_id, buyer_id, product_id, amount, time
     """
     np.random.seed(seed)
     all_transactions = []
-    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
+    pending = np.zeros(inventories.shape)  # n_firms x n_products, firms put in order for product but haven't received
+    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input 
+    prod_mat = get_prod_mat(prod_graph, prod2idx)
+    
     for t in range(num_timesteps):      
         # add new demand from consumers
         if demand_schedule is not None:
             demand_schedule_t = demand_schedule[t]
             for p in consumer_prods:
                 for f in prod2firms[p]:
-                    curr_orders[len(firms), firm2idx[f], prod2idx[p]] += demand_schedule_t[(f,p)]
+                    curr_orders[(f, p)].append(('consumer', demand_schedule_t[(f,p)]))
         
         # get new transactions at time t
         transactions_t = []
-        future_inputs_needed = np.zeros(inventories.shape)  # n_firms x n_products
-        # should be order-invariant: a firm's actions at time t shouldn't be affected by other firms' actions
-        # firm's actions depend on its inventory and orders *to* the firm
-        if use_random_firm_order:  # to test order invariance, try this
-            rand_idx = np.random.choice(len(firms), replace=False, size=len(firms))
-            firm_order = np.array(firms)[rand_idx]
-            print(firm_order[:10])
-        else:
-            firm_order = firms
+        all_inputs_needed = np.zeros(inventories.shape)  # n_firms x n_products
+        rand_idx = np.random.choice(len(firms), replace=False, size=len(firms))
+        firm_order = np.array(firms)[rand_idx]
         for f in firm_order:
             exog_supp_t = exog_supp if exog_schedule is None else exog_schedule[t]  # supply of exog products at time t
             inventories, curr_orders, transactions_completed, inputs_needed = simulate_actions_for_firm(
-                f, inventories, curr_orders, exog_supp_t, firms, products, firm2idx, prod2idx, prod_graph, firm2prods, 
+                f, inventories, curr_orders, exog_supp_t, firms, products, firm2idx, prod2idx, prod_mat, firm2prods, 
                 prod2firms, inputs2supplier, debug=debug)
             transactions_t += transactions_completed
-            future_inputs_needed[firm2idx[f]] = inputs_needed
+            all_inputs_needed[firm2idx[f]] = inputs_needed
             
-        # update firms' inventories (add to buyers) based on completed transactions, record transactions
+        # update firms' inventories and pending based on completed transactions, record transactions
         if len(transactions_t) > 0:
             s_idxs, b_idxs, p_idxs, amts = list(zip(*transactions_t))
-            inventories += csr_matrix((amts, (b_idxs, p_idxs)), shape=inventories.shape).toarray()  # add to buyers' inventories
+            buyer_product_mat = csr_matrix((amts, (b_idxs, p_idxs)), shape=(len(firms), len(products))).toarray()
+            inventories = np.round(inventories+buyer_product_mat, num_decimals)  # add to buyers' inventories
+            pending = np.round(pending-buyer_product_mat, num_decimals)  # subtract from pending
+            
             transactions_df = pd.DataFrame(transactions_t, columns=['supplier_id', 'buyer_id', 'product_id', 'amount'])
             transactions_df['time'] = t
             all_transactions.append(transactions_df)
         
-        # make new orders based on inventories and future inputs needed
-        future_inputs_needed = np.clip(future_inputs_needed - inventories, 0, None)  # what is still needed
-        b_idxs, p_idxs = np.nonzero(future_inputs_needed)
-        for b_idx, p_idx in zip(b_idxs, p_idxs):
-            s_idx = firm2idx[inputs2supplier[(firms[b_idx], products[p_idx])]]
-            curr_orders[b_idx, s_idx, p_idx] = max(curr_orders[b_idx, s_idx, p_idx], future_inputs_needed[b_idx, p_idx])
-            
-        # avoid rounding errors
-        inventories = np.round(inventories, num_decimals)
-        curr_orders = np.round(curr_orders, num_decimals)
-        num_orders = len(np.nonzero(curr_orders)[0])
+        # make new orders based on inputs needed, inventories, and pending
+        all_inputs_needed = np.clip(all_inputs_needed - inventories - pending, 0, None)  # what is still needed
+        all_inputs_needed = np.round(all_inputs_needed, num_decimals)
+        for f in firm_order:  # allow firms to make new orders in random order - order matters here
+            f_idx = firm2idx[f]
+            inputs_needed = all_inputs_needed[f_idx]
+            for p_idx in inputs_needed.nonzero()[0]:
+                p = products[p_idx]
+                s = inputs2supplier[(f,p)]
+                curr_orders[(s, p)].append((f, inputs_needed[p_idx]))
+                pending[f_idx, p_idx] += inputs_needed[p_idx]
+                
+        num_orders = np.sum([len(v) for v in curr_orders.values()])
         print(f't={t}: generated {len(transactions_t)} transactions, {num_orders} current orders')
-        # print_curr_orders(curr_orders, firms, products)
         if num_orders == 0:
             print('No remaining orders, ending simulation')
             break
         
     all_transactions = pd.concat(all_transactions)
+    orig_len = len(all_transactions)
+    # it's possible for there to be multiple of the same triplet on a day if a firm processes multiple orders
+    # for the same buyer, product -> sum over amount
+    all_transactions = all_transactions.groupby(['supplier_id', 'buyer_id', 'product_id', 'time']).sum().reset_index()
+    print(f'Grouped by supplier, buyer, product, and time -> reduced {orig_len} transactions to {len(all_transactions)}')
     return all_transactions
         
 
 def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-varying info
                               firms, products, firm2idx, prod2idx,  # nodes + indexing
-                              prod_graph, firm2prods, prod2firms, inputs2supplier,  # static graphs
+                              prod_mat, firm2prods, prod2firms, inputs2supplier,  # static graphs
                               debug=False):
     """
     Simulate actions for a given firm f following agent-based model. No need for seed because deterministic.
-    Inputs:
-        f: name of firm
-        inventories: firm x product, shape: (n_firms x n_products)
-        curr_orders: buyer x supplier x product, shape: (n_firms+1 x n_firms x n_products); 
-                     the +1 is to represent consumer as buyer
-        exog_supp: current supply per (firm, product) for all exogenous products
-    
+    Inputs: see above
     Returns:
         inventories: same shape as before, modified with f's consumption subtracted
         curr_orders: same shape as before, modified with orders *to* f subtracted
@@ -257,59 +267,55 @@ def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-va
     inventories = inventories.copy()  # copy bc it'll be modified
     curr_orders = curr_orders.copy()  # copy bc it'll be modified
     transactions_completed = []  # list of (supplier_id, buyer_id, product_id, amount)
-    inputs_needed = np.zeros(len(products))
+    inputs_needed = np.zeros(len(products))  # what inputs are still needed for unfulfilled orders
     f_idx = firm2idx[f]
+    
     for p in firm2prods[f]:  # order matters here because inventory changes
-        if debug: 
-            print('Processing', p)
-        p_idx = prod2idx[p]
-        if np.sum(curr_orders[:, f_idx, p_idx]) == 0:
+        if len(curr_orders[(f,p)]) == 0:
             if debug:
-                print('No orders for firm+product, skipping')
+                print(f'No orders for {p}, skipping')
         else:
+            p_idx = prod2idx[p]
             if debug:
-                print('Before processing...')
-                print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs_needed, firms, products)
+                print(f'Processing {p}...')
+                print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs_needed, firms, products)            
             
-            # get maximum amount of p that f could make
-            inputs_p = prod_graph[prod_graph['dest'] == p]
-            input2units = dict(zip(inputs_p.source, inputs_p.units))
-            if debug: 
-                print('inputs for product', input2units)
-            if len(input2units) == 0:  # exogenous
-                p_max = exog_supp[(f, p)]
+            # complete as many orders as possible, first-in-first-out
+            fp_orders = curr_orders[(f,p)]
+            p_inputs = prod_mat[p_idx]  # inputs required to make p, as vector of length products
+            order_num = 0
+            if np.sum(p_inputs) == 0:  # exogenous product
+                supply = exog_supp[(f,p)]
+                for buyer, amt in fp_orders:
+                    assert buyer != 'consumer'  # consumers don't buy exogenous products directly
+                    if amt <= supply:
+                        supply -= amt
+                        transactions_completed.append((f_idx, firm2idx[buyer], p_idx, amt))
+                        order_num += 1 
+                    else:
+                        break
             else:
-                p_max = []
-                for s, units in input2units.items():
-                    p_max.append(inventories[f_idx, prod2idx[s]]/units)
-                    if debug: 
-                        print(f'Based on {s}, could make {p_max[-1]:.2f} of {p}')
-                p_max = np.min(p_max)
-
-            # produce output, subtract from inventory
-            fp_orders = curr_orders[:, f_idx, p_idx]
-            p_ordered = np.sum(fp_orders)  # total amount ordered
-            p_out = min(p_ordered, p_max)  # min of amount ordered and max amount f could produce
-            if debug: 
-                print(f'Amount ordered: {p_ordered:.2f}; Amount made: {p_out:.2f}')
-            for s, units in input2units.items():
-                inventories[f_idx, prod2idx[s]] -= p_out * units
-
-            # allocate output to buyers, subtract from orders to f
-            allocated_per_buyer = p_out * (fp_orders / np.sum(fp_orders))  # proportional
-            for b_idx in np.nonzero(allocated_per_buyer)[0]:
-                if b_idx < len(firms):  # otherwise, indicates consumer demand
-                    transactions_completed.append((f_idx, b_idx, p_idx, allocated_per_buyer[b_idx]))
-                curr_orders[b_idx, f_idx, p_idx] -= allocated_per_buyer[b_idx]
-
+                for buyer, amt in fp_orders:
+                    order_inputs_needed = amt * p_inputs  # inputs required to complete order
+                    if (inventories[f_idx] >= order_inputs_needed).all():  # need to have enough of all inputs
+                        inventories[f_idx] -= order_inputs_needed  # subtract from inventory
+                        if buyer != 'consumer':
+                            transactions_completed.append((f_idx, firm2idx[buyer], p_idx, amt))
+                        order_num += 1 
+                    else:
+                        break
+            if debug:
+                print(f'Got through {order_num} out of {len(fp_orders)} orders')
+            curr_orders[(f,p)] = fp_orders[order_num:]
+            
             # record what inputs are still needed for unfulfilled orders
-            remaining = np.sum(curr_orders[:, f_idx, p_idx])
-            for s, units in input2units.items():
-                inputs_needed[prod2idx[s]] += remaining * units
+            remaining = np.sum([amt for buyer, amt in curr_orders[(f,p)]])
+            inputs_needed += remaining * p_inputs
                 
             if debug: 
                 print('After processing...')
                 print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs_needed, firms, products)
+    
     return inventories, curr_orders, transactions_completed, inputs_needed
 
 
@@ -324,13 +330,7 @@ def print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs
         dict_curr_inv = {products[p_idx]:curr_inv[p_idx] for p_idx in np.nonzero(curr_inv)[0]}
         print('firm inventory', dict_curr_inv)
     
-    orders_to_f = curr_orders[:, f_idx, p_idx]  # length n_firms+1
-    dict_orders_to_f = {}
-    for b_idx in np.nonzero(orders_to_f)[0]:
-        buyer = firms[b_idx] if b_idx < len(firms) else 'consumer'
-        dict_orders_to_f[buyer] = orders_to_f[b_idx]
-    print('orders for firm+product', dict_orders_to_f)
-    
+    print('orders for firm+product', curr_orders[(firms[f_idx], products[p_idx])])
     dict_inputs_needed = {products[s_idx]:inputs_needed[s_idx] for s_idx in np.nonzero(inputs_needed)[0]}
     print('inputs needed by firm', dict_inputs_needed)
     
@@ -339,6 +339,8 @@ def print_curr_orders(curr_orders, firms, products, max_print=10):
     """
     Print current orders. Used for debugging.
     """
+    for (f,p), orders in curr_orders.items():
+        print(f, p, orders[:max_print])
     buyer_idx, supplier_idx, prod_idx = np.nonzero(curr_orders)
     for b, s, p in zip(buyer_idx[:max_print], supplier_idx[:max_print], prod_idx[:max_print]):
         buyer = firms[b] if b < len(firms) else 'consumer'
@@ -366,6 +368,16 @@ def get_supply_chain_for_product(prod, prod_graph):
         curr_layer = next_layer
         next_layer = set()
     return layers
+
+def get_prod_mat(prod_graph, prod2idx):
+    """
+    Convert prod_graph, a pd DataFrame, to a matrix.
+    """
+    row_idx = [prod2idx[p] for p in prod_graph['dest'].values]
+    col_idx = [prod2idx[p] for p in prod_graph['source'].values]
+    m = csr_matrix((prod_graph['units'].values, (row_idx, col_idx)), shape=(len(prod2idx), len(prod2idx))).toarray()
+    return m
+
 
 def get_stats_on_firm_network(inputs2supplier):
     """
