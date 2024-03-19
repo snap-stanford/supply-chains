@@ -1,4 +1,5 @@
 from collections import Counter
+import json
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -172,7 +173,8 @@ def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, se
 def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  # time-varying info
                           firms, products, firm2idx, prod2idx,  # nodes + indexing
                           prod_graph, firm2prods, prod2firms, inputs2supplier,  # static graphs
-                          exog_schedule=None, demand_schedule=None, num_decimals=5, seed=0, debug=False):
+                          exog_schedule=None, demand_schedule=None, gamma=0.8, num_decimals=5, 
+                          seed=0, debug=False):
     """
     Generate transactions using agent-based model to determine firm's actions per timestep.
     Inputs:
@@ -190,6 +192,8 @@ def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  #
     pending = np.zeros(inventories.shape)  # n_firms x n_products, firms put in order for product but haven't received
     consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input 
     prod_mat = get_prod_mat(prod_graph, prod2idx)
+    if gamma < 1:
+        print(f'Using same-supplier probability gamma = {gamma}')
     
     for t in range(num_timesteps):      
         # add new demand from consumers
@@ -231,7 +235,14 @@ def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  #
             inputs_needed = all_inputs_needed[f_idx]
             for p_idx in inputs_needed.nonzero()[0]:
                 p = products[p_idx]
-                s = inputs2supplier[(f,p)]
+                if gamma < 1:
+                    suppliers = prod2firms[p]
+                    uni_prob = (1-gamma) / len(suppliers)  # with prob 1-gamma, randomly choose a supplier
+                    probs = [gamma+uni_prob if s == inputs2supplier[(f,p)] else uni_prob for s in suppliers]
+                    assert np.isclose(1, np.sum(probs))
+                    s = np.random.choice(suppliers, p=probs)
+                else:
+                    s = inputs2supplier[(f,p)]  # deterministic
                 curr_orders[(s, p)].append((f, inputs_needed[p_idx]))
                 pending[f_idx, p_idx] += inputs_needed[p_idx]
                 
@@ -534,6 +545,112 @@ def eval_timeseries_for_product(prod, transactions, firms, products, firm2idx, p
             print(f'Never supplied {prod} in transactions; skipping')
     return conditions2corrs
 
+def measure_temporal_variation_in_triplets(transactions, verbose=False):
+    """
+    Measure how much variation there is over days in the set of triplets that appear.
+    """
+    seen = set()
+    seen_prev = set()
+    min_t = transactions.time.min()
+    max_t = transactions.time.max()
+    t_range = range(min_t, max_t+1)
+    new_to_seen = []
+    seen_missing = []
+    new_to_seen_prev = []
+    seen_prev_missing = []
+    for t in t_range:
+        txns = transactions[transactions.time == t]
+        unique_triplets = set(zip(txns.supplier_id, txns.buyer_id, txns.product_id))
+        assert len(unique_triplets) == len(txns)
+        if verbose: 
+            print(f't={t} -> {len(unique_triplets)} triplets')
+        
+        if len(seen) > 0 and len(seen_prev) > 0:
+            new_triplets = unique_triplets - seen
+            prop_new = len(new_triplets)/len(unique_triplets)
+            new_to_seen.append(prop_new)
+            missing_triplets = seen - unique_triplets
+            prop_missing = len(missing_triplets)/len(seen)
+            seen_missing.append(prop_missing)
+            if verbose:
+                print(f'Relative to all triplets: {len(new_triplets)} ({prop_new*100:0.2f}%) are new')
+                print(f'Out of all triplets: {len(missing_triplets)} ({prop_missing*100:0.2f}%) not seen today')
+
+            new_triplets = unique_triplets - seen_prev
+            prop_new = len(new_triplets)/len(unique_triplets)
+            new_to_seen_prev.append(prop_new)
+            missing_triplets = seen_prev - unique_triplets
+            prop_missing = len(missing_triplets)/len(seen_prev)
+            seen_prev_missing.append(prop_missing)
+            if verbose:
+                print(f'Relative to yesterday\'s triplets: {len(new_triplets)} ({prop_new*100:0.2f}%) are new')
+                print(f'Out of yesterday\'s triplets: {len(missing_triplets)} ({prop_missing*100:0.2f}%) not seen today')
+        
+        seen = seen.union(unique_triplets)
+        seen_prev = unique_triplets
+    
+    plt.plot(t_range[1:], new_to_seen, label='New triplet, all')
+    plt.plot(t_range[1:], new_to_seen_prev, label='New triplet, rel to t-1')
+    plt.plot(t_range[1:], seen_missing, label='Missing triplet, all')
+    plt.plot(t_range[1:], seen_prev_missing, label='Missing triplet, rel to t-1')
+    plt.legend()
+    plt.grid(alpha=0.2)
+    plt.show()
+    
+def check_negative_sampling(data_name, neg_samples=18):
+    """
+    Check results from negative sampling.
+    """
+    data_dir = f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{data_name.replace('-', '_')}/"
+    with open(os.path.join(data_dir, f'{data_name}_val_ns.pkl'), 'rb') as f:
+        val_ns = pickle.load(f)
+    edgelist_df = pd.read_csv(os.path.join(data_dir, f'{data_name}_edgelist.csv'))
+    with open(os.path.join(data_dir, f'{data_name}_meta.json'), 'r') as f:
+        meta = json.load(f)
+
+    max_train = meta['train_max_ts'] 
+    max_val = meta['val_max_ts'] 
+    train_df = edgelist_df[edgelist_df.ts <= max_train]
+    val_df = edgelist_df[(edgelist_df.ts > max_train) & (edgelist_df.ts <= max_val)]
+    test_df = edgelist_df[edgelist_df.ts > max_val]
+    print(f'Train len={len(train_df)}, Val len={len(val_df)}, Test len={len(test_df)}')
+
+    train_triples = set(zip(train_df['source'].values, train_df['target'].values, train_df['product'].values))
+    print(f'{len(train_triples)} unique train triples')
+    val_tuples = set(zip(val_df['source'].values, val_df['target'].values, 
+                         val_df['product'].values, val_df['ts'].values))
+    assert len(val_ns) == len(val_df), len(val_ns)
+    num_historicals = []
+    num_overlap_historicals = []
+    for pos, negs in val_ns.items():
+        assert pos in val_tuples
+        n_historical = 0
+        n_perturb = 0
+        n_overlap_historical = 0
+        negs = [tuple(negs[i]) for i in range(neg_samples)]  # convert to list of tuples
+        assert len(set(negs)) == neg_samples  # should be unique
+        for neg in negs:
+            assert (neg[0], neg[1], neg[2], pos[-1]) not in val_tuples
+            overlap = np.sum([int(pos[i] == neg[i]) for i in range(3)])
+            if neg in train_triples:
+                n_historical += 1
+                if overlap > 0:
+                    n_overlap_historical += 1
+            if overlap == 2:
+                n_perturb += 1
+        assert n_historical >= (neg_samples/2)  # at least 50% should be historical
+        assert n_perturb >= (neg_samples/2)  # at least 50% should have one node perturbed
+        num_historicals.append(n_historical)
+        num_overlap_historicals.append(n_overlap_historical)
+
+    for i in sorted(set(num_historicals)):
+        num_data_points = np.sum(np.array(num_historicals) == i)
+        print(f'Num historicals = {i} -> {num_data_points}')
+        
+    for i in sorted(set(num_overlap_historicals)):
+        num_data_points = np.sum(np.array(num_overlap_historicals) == i)
+        print(f'Num overlap historicals = {i} -> {num_data_points}')
+        
 
 ###################################################
 # Functions to evaluate against ground-truth production functions
