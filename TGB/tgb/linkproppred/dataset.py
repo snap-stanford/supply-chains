@@ -319,6 +319,14 @@ class LinkPropPredDataset(object):
         """
         return self.ns_sampler
 
+    def load_train_ns(self) -> None:
+        r"""
+        load the negative samples for the train set
+        """
+        self.ns_sampler.load_eval_set(
+            fname=self.root + "/" + self.name + "_train_ns.pkl", split_mode="train"
+        )
+        
     def load_val_ns(self) -> None:
         r"""
         load the negative samples for the validation set

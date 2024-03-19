@@ -12,6 +12,8 @@ from tgb.utils.info import PROJ_DIR
 import os
 import time
 
+VALID_SPLIT_MODES = ['train', 'val', 'test']
+
 class NegativeHyperEdgeSampler(object):
     def __init__(
         self,
@@ -53,10 +55,7 @@ class NegativeHyperEdgeSampler(object):
         Returns:
             None
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         if not os.path.exists(fname):
             raise FileNotFoundError(f"File not found at {fname}")
         self.eval_set[split_mode] = load_pkl(fname)
@@ -73,10 +72,7 @@ class NegativeHyperEdgeSampler(object):
         Returns:
             None
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         self.eval_set[split_mode] = None
 
     def query_batch(self, 
@@ -100,10 +96,7 @@ class NegativeHyperEdgeSampler(object):
             neg_samples: a list of list; each internal list contains the set of negative edges that
                         should be evaluated against each positive edge.
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         if self.eval_set[split_mode] == None:
             raise ValueError(
                 f"Evaluation set is None! You should load the {split_mode} evaluation set first!"
@@ -139,128 +132,9 @@ class NegativeHyperEdgeSampler(object):
                     ]
                 )
 
-        return neg_samples
+        return neg_samples    
+
     
-class NegativeHyperEdgeSampler_V2(object):
-    def __init__(
-        self,
-        dataset_name: str,
-        strategy: str = "hist_rnd",
-    ) -> None:
-        r"""
-        Negative Edge Sampler
-            Loads and query the negative batches based on the positive batches provided.
-        constructor for the negative edge sampler class
-        Parameters:
-            dataset_name: name of the dataset
-            strategy: specifies which set of negatives should be loaded;
-                    can be 'rnd' or 'hist_rnd'
-        
-        Returns:
-            None
-        """
-        self.dataset_name = dataset_name
-        assert strategy in [
-            "rnd",
-            "hist_rnd",
-        ], "The supported strategies are `rnd` or `hist_rnd`!"
-        self.strategy = strategy
-        self.eval_set = {}
-
-    def load_eval_set(
-        self,
-        fname: str,
-        split_mode: str = "val",
-    ) -> None:
-        r"""
-        Load the evaluation set from disk, can be either val or test set ns samples
-        Parameters:
-            fname: the file name of the evaluation ns on disk
-            split_mode: the split mode of the evaluation set, can be either `val` or `test`
-        
-        Returns:
-            None
-        """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`"
-        if not os.path.exists(fname):
-            raise FileNotFoundError(f"File not found at {fname}")
-        self.eval_set[split_mode] = load_pkl(fname)
-
-    def reset_eval_set(self, 
-                       split_mode: str = "test",
-                       ) -> None:
-        r"""
-        Reset evaluation set
-        Parameters:
-            split_mode: specifies whether to generate negative edges for 'validation' or 'test' splits
-        Returns:
-            None
-        """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
-        self.eval_set[split_mode] = None
-
-    def query_batch(self, 
-                    pos_src: Tensor, 
-                    pos_prod: Tensor,
-                    pos_dst: Tensor, 
-                    pos_timestamp: Tensor, 
-                    split_mode: str = "test") -> list:
-        r"""
-        For each positive edge in the `pos_batch`, return a list of negative edges
-        `split_mode` specifies whether the valiation or test evaluation set should be retrieved.
-        Parameters:
-            pos_src: list of positive source nodes
-            pos_prod: list of positive product nodes
-            pos_dst: list of positive destination nodes
-            pos_timestamp: list of timestamps of the positive edges
-            split_mode: specifies whether to generate negative edges for 'validation' or 'test' splits
-        Returns:
-            neg_samples: a list of list; each internal list contains the set of negative edges that
-                        should be evaluated against each positive edge.
-        """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
-        if self.eval_set[split_mode] == None:
-            raise ValueError(
-                f"Evaluation set is None! You should load the {split_mode} evaluation set first!"
-            )
-
-        # check the argument types...
-        if torch is not None and isinstance(pos_src, torch.Tensor):
-            pos_src = pos_src.detach().cpu().numpy()
-        if torch is not None and isinstance(pos_prod, torch.Tensor):
-            pos_prod = pos_prod.detach().cpu().numpy()
-        if torch is not None and isinstance(pos_dst, torch.Tensor):
-            pos_dst = pos_dst.detach().cpu().numpy()
-        if torch is not None and isinstance(pos_timestamp, torch.Tensor):
-            pos_timestamp = pos_timestamp.detach().cpu().numpy()
-
-        if not isinstance(pos_src, np.ndarray) or not isinstance(pos_prod, np.ndarray) or not isinstance(pos_dst, np.ndarray) or not(pos_timestamp, np.ndarray):
-            raise RuntimeError(
-                "pos_src, pos_prod, pos_dst, and pos_timestamp need to be either numpy ndarray or torch tensor!"
-                )
-
-        neg_samples = []
-        for pos_s, pos_p, pos_d, pos_t in zip(pos_src, pos_prod, pos_dst, pos_timestamp):
-            if (pos_s, pos_p, pos_d, pos_t) not in self.eval_set[split_mode]:
-                raise ValueError(
-                    f"The edge ({pos_s}, {pos_p}, {pos_d}, {pos_t}) is not in the '{split_mode}' evaluation set! Please check the implementation."
-                )
-            else:
-                batch_neg_hyperedges = self.eval_set[split_mode][(pos_s, pos_p, pos_d, pos_t)]
-                neg_samples.append(batch_neg_hyperedges)
-
-        return neg_samples
-    
-
 class NegativeHyperEdgeSampler_V2(object):
     def __init__(
         self,
@@ -302,10 +176,7 @@ class NegativeHyperEdgeSampler_V2(object):
         Returns:
             None
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         if not os.path.exists(fname):
             raise FileNotFoundError(f"File not found at {fname}")
         self.eval_set[split_mode] = load_pkl(fname)
@@ -322,10 +193,7 @@ class NegativeHyperEdgeSampler_V2(object):
         Returns:
             None
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         self.eval_set[split_mode] = None
 
     def query_batch(self, 
@@ -349,10 +217,7 @@ class NegativeHyperEdgeSampler_V2(object):
             neg_samples: a list of list; each internal list contains the set of negative edges that
                         should be evaluated against each positive edge.
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         if self.eval_set[split_mode] == None:
             raise ValueError(
                 f"Evaluation set is None! You should load the {split_mode} evaluation set first!"
@@ -384,6 +249,7 @@ class NegativeHyperEdgeSampler_V2(object):
                 neg_samples.append(batch_neg_hyperedges)
 
         return neg_samples
+        
         
 class NegativeEdgeSampler(object):
     def __init__(
@@ -426,10 +292,7 @@ class NegativeEdgeSampler(object):
         Returns:
             None
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         if not os.path.exists(fname):
             raise FileNotFoundError(f"File not found at {fname}")
         self.eval_set[split_mode] = load_pkl(fname)
@@ -446,10 +309,7 @@ class NegativeEdgeSampler(object):
         Returns:
             None
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         self.eval_set[split_mode] = None
 
     def query_batch(self, 
@@ -471,10 +331,7 @@ class NegativeEdgeSampler(object):
             neg_samples: a list of list; each internal list contains the set of negative edges that
                         should be evaluated against each positive edge.
         """
-        assert split_mode in [
-            "val",
-            "test",
-        ], "Invalid split-mode! It should be `val`, `test`!"
+        assert split_mode in VALID_SPLIT_MODES, f"Invalid split-mode! It should be one of {VALID_SPLIT_MODES}"
         if self.eval_set[split_mode] == None:
             raise ValueError(
                 f"Evaluation set is None! You should load the {split_mode} evaluation set first!"

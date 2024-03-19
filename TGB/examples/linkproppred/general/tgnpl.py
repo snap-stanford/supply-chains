@@ -40,7 +40,7 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPred
 # ===========================================
 def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                           ns_samples=6, neg_sampler=None, split_mode="val",
-                          num_firms=None, num_products=None, use_prev_sampling = False):
+                          num_firms=None, num_products=None, use_prev_sampling=False):
     """
     Get model scores for a batch's positive edges and its corresponding negative samples.
     If neg_sampler is None, sample negative samples at random.
@@ -96,7 +96,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
             device=device,
         )
 
-    elif (use_prev_sampling == True):
+    elif use_prev_sampling:
         #using the negative sampling procedure prior to Oct 24 (no loose negatives)
         neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
         assert len(neg_batch_list) == bs
@@ -119,7 +119,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         batch_dst = torch.cat((torch.unsqueeze(pos_dst,-1), neg_dst), dim = -1)
         batch_prod = torch.cat((torch.unsqueeze(pos_prod,-1), neg_prod), dim = -1)
         
-    if (neg_sampler is None or use_prev_sampling == True):
+    if (neg_sampler is None or use_prev_sampling):
         num_samples = (3*ns_samples)+1  # total num samples per data point
         batch_src = pos_src.reshape(bs, 1).repeat(1, num_samples)  # [[src1, src1, ...], [src2, src2, ...]]
         batch_src[:, 1:ns_samples+1] = neg_src  # replace pos_src with negatives
@@ -184,7 +184,7 @@ def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devi
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', update_params=True, 
           ns_samples=6, neg_sampler=None, split_mode="val",
-          num_firms=None, num_products=None, use_prev_sampling = False):
+          num_firms=None, num_products=None, use_prev_sampling=False):
     """
     Training procedure for TGN-PL model.
     Parameters:
@@ -232,7 +232,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
 
         y_pred, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
-                                       num_firms=num_firms, num_products=num_products, use_prev_sampling = use_prev_sampling)
+                                       num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling)
         if 'inventory' in model:  # will be in model if args.use_inventory = True
             inv_loss, debt_loss, consump_rwd_loss = _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                                       num_firms=num_firms, num_products=num_products)
@@ -376,6 +376,7 @@ def get_tgnpl_args():
     parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
     parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
     parser.add_argument('--train_on_val', type=bool, default=False, help='If true, train on validation set with fixed negative sampled; used for debugging')
+    parser.add_argument('--train_with_fixed_samples', default=False, action="store_true", help='If true, use fixed negative samples for training')
     parser.add_argument('--use_prev_sampling', action='store_true', help = "if true, use previous hypergraph sampling method")
     
     try:
@@ -591,6 +592,8 @@ def run_experiment(args):
     print('Converted amount to log-scale and applied standard scaling: mean = %.2f' % torch.mean(data.msg))
     if args.train_on_val:
         print('Warning: ignoring train set, training on validation set and its fixed negative samples')
+    if args.train_with_fixed_samples:
+        print('Using fixed negative samples for train')
     
     # Initialize model
     model, opt = set_up_model(args, data, device)
@@ -631,7 +634,6 @@ def run_experiment(args):
                                          tolerance=args.tolerance, patience=args.patience)
 
         # ==================================================== Train & Validation
-        dataset.load_val_ns()  # load validation negative samples
         train_loss_list = []
         val_perf_list = []
         start_train_val = timeit.default_timer()
@@ -639,17 +641,22 @@ def run_experiment(args):
             start_epoch_train = timeit.default_timer()
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
-
-                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(model, opt, neighbor_loader, data, val_loader, device, 
-                                                    neg_sampler=neg_sampler, split_mode="val", 
-                                                    use_prev_sampling = args.use_prev_sampling)
-                # Reset memory and graph for beginning of val
-                model['memory'].reset_state()  
+                dataset.load_val_ns()  # load val negative samples
+                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(
+                    model, opt, neighbor_loader, data, val_loader, device, 
+                    neg_sampler=neg_sampler, split_mode="val", use_prev_sampling=args.use_prev_sampling)
+                model['memory'].reset_state()  # reset memory and graph for beginning of val
                 neighbor_loader.reset_state()
+            elif args.train_with_fixed_samples:
+                # train on fixed negative samples instead of randomly drawn per epoch
+                dataset.load_train_ns()  # load train negative samples
+                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(
+                    model, opt, neighbor_loader, data, train_loader, device, 
+                    neg_sampler=neg_sampler, split_mode="train", use_prev_sampling=args.use_prev_sampling)
+                # Don't reset memory and graph since val is a continuation of train
             else:
-              
-                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(model, opt, neighbor_loader, data, train_loader, device,
-                                                    use_prev_sampling = args.use_prev_sampling)
+                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(
+                    model, opt, neighbor_loader, data, train_loader, device)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             print(
@@ -659,8 +666,9 @@ def run_experiment(args):
 
             # validation
             start_val = timeit.default_timer()
+            dataset.load_val_ns()  # load val negative samples
             perf_metric_val = test(model, neighbor_loader, data, val_loader, neg_sampler, evaluator,
-                                   device, split_mode="val", metric=metric, use_prev_sampling = args.use_prev_sampling)
+                                   device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling)
             time_val = timeit.default_timer() - start_val
             print(f"\tValidation {metric}: {perf_metric_val: .4f}")
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
@@ -719,7 +727,7 @@ def run_experiment(args):
         dataset.load_test_ns()  # load test negatives
         start_test = timeit.default_timer()
         perf_metric_test = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
-                                device, split_mode="test", metric=metric, use_prev_sampling = args.use_prev_sampling)
+                                device, split_mode="test", metric=metric, use_prev_sampling=args.use_prev_sampling)
 
         print(f"INFO: Test: Evaluation Setting: >>> ONE-VS-MANY <<< ")
         print(f"\tTest: {metric}: {perf_metric_test: .4f}")

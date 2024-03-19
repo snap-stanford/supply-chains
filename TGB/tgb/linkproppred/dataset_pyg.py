@@ -61,6 +61,12 @@ class PyGLinkPropPredDataset(Dataset):
         """
         return self._ns_sampler
 
+    def load_train_ns(self) -> None:
+        r"""
+        load the negative samples for the train set
+        """
+        self.dataset.load_train_ns()
+        
     def load_val_ns(self) -> None:
         r"""
         load the negative samples for the validation set
