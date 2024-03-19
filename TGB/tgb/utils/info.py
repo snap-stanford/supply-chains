@@ -53,14 +53,13 @@ DATA_EVAL_METRIC_DICT = {
 
 DATA_EVAL_METRIC_DICT.update(
     {f"tgbl-supplychains{prod}{year}": "mrr" for year in list(range(2019, 2022 + 1)) + ["all_years"] for prod in ["","product"]})
-DATA_EVAL_METRIC_DICT.update(
-    {f"tgbl-hypergraph{year}": "mrr" for year in list(range(2019, 2022 + 1)) + [
-	"all_years",
-	"_tesla",
-	"_synthetic",
-	"_synthetic_shocks",
-	"_2019_to_2022"
-    ]})
+
+# add all datasets that starts with 'tgbl_hypergraph'
+DATA_DIR = osp.join(PROJ_DIR, 'datasets')
+for subdir in os.listdir(DATA_DIR):
+    if osp.isdir(osp.join(DATA_DIR, subdir)) and subdir.startswith('tgbl_hypergraph'):
+        dataset_name = 'tgbl-hypergraph_' + '_'.join(subdir.split('_')[2:])
+        DATA_EVAL_METRIC_DICT[dataset_name] = 'mrr'
 
 DATA_NUM_CLASSES = {
     "tgbn-trade": 255,
