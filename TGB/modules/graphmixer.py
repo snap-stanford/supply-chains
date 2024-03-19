@@ -2,20 +2,20 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from models.modules import TimeEncoder
-from utils.utils import NeighborSampler
+from modules.neighbor_loader import LastNeighborLoaderGraphmixer
 
+EMPTY_VALUE = -1 # same as what's filled in all attributes when resetting the neighborloader 
 
 class GraphMixer(nn.Module):
 
-    def __init__(self, node_raw_features: np.ndarray, edge_raw_features: np.ndarray, neighbor_sampler: NeighborSampler,
+    def __init__(self, node_raw_features: torch.Tensor, edge_raw_features: torch.Tensor,
                  time_feat_dim: int, num_tokens: int, num_layers: int = 2, token_dim_expansion_factor: float = 0.5,
                  channel_dim_expansion_factor: float = 4.0, dropout: float = 0.1, device: str = 'cpu'):
         """
         TCL model.
-        :param node_raw_features: ndarray, shape (num_nodes + 1, node_feat_dim)
-        :param edge_raw_features: ndarray, shape (num_edges + 1, edge_feat_dim)
-        :param neighbor_sampler: neighbor sampler
+        :param node_raw_features: Tensor, shape (num_nodes + 1, node_feat_dim)
+        :param edge_raw_features: Tensor, shape (num_edges + 1, edge_feat_dim)
+        # :param neighbor_sampler: neighbor sampler
         :param time_feat_dim: int, dimension of time features (encodings)
         :param num_tokens: int, number of tokens
         :param num_layers: int, number of transformer layers
@@ -26,10 +26,10 @@ class GraphMixer(nn.Module):
         """
         super(GraphMixer, self).__init__()
 
-        self.node_raw_features = torch.from_numpy(node_raw_features.astype(np.float32)).to(device)
-        self.edge_raw_features = torch.from_numpy(edge_raw_features.astype(np.float32)).to(device)
+        self.node_raw_features = node_raw_features.float().to(device) # this is preset to full data features  
+        self.edge_raw_features = edge_raw_features.float() # TODO: currently not using this
 
-        self.neighbor_sampler = neighbor_sampler
+        self.neighbor_sampler = None # assigned later 
         self.node_feat_dim = self.node_raw_features.shape[1]
         self.edge_feat_dim = self.edge_raw_features.shape[1]
         self.time_feat_dim = time_feat_dim
@@ -54,53 +54,78 @@ class GraphMixer(nn.Module):
 
         self.output_layer = nn.Linear(in_features=self.num_channels + self.node_feat_dim, out_features=self.node_feat_dim, bias=True)
 
-    def compute_src_dst_node_temporal_embeddings(self, src_node_ids: np.ndarray, dst_node_ids: np.ndarray,
-                                                 node_interact_times: np.ndarray, num_neighbors: int = 20, time_gap: int = 2000):
+    def compute_src_dst_prod_node_temporal_embeddings(self, src_node_ids: torch.Tensor, dst_node_ids: torch.Tensor, prod_node_ids: torch.Tensor,
+                                                        edge_raw_features: torch.Tensor, node_interact_times: torch.Tensor, 
+                                                        neighbor_loader: LastNeighborLoaderGraphmixer, num_neighbors: int = 20, time_gap: int = 2000):
         """
         compute source and destination node temporal embeddings
-        :param src_node_ids: ndarray, shape (batch_size, )
-        :param dst_node_ids: ndarray, shape (batch_size, )
-        :param node_interact_times: ndarray, shape (batch_size, )
+        :param src_node_ids: Tensor, shape (batch_size, )
+        :param dst_node_ids: Tensor, shape (batch_size, )
+        :param prod_node_ids: Tensor, shape (batch_size, )
+        :param edge_raw_features: Tensor, shape (batch_size, )
+        :param node_interact_times: Tensor, shape (batch_size, )
         :param num_neighbors: int, number of neighbors to sample for each node
         :param time_gap: int, time gap for neighbors to compute node features
         :return:
         """
+        self.neighbor_sampler = neighbor_loader
+        self.edge_raw_features = edge_raw_features
+
         # Tensor, shape (batch_size, node_feat_dim)
         src_node_embeddings = self.compute_node_temporal_embeddings(node_ids=src_node_ids, node_interact_times=node_interact_times,
+                                                                    edge_raw_features = edge_raw_features,
                                                                     num_neighbors=num_neighbors, time_gap=time_gap)
         # Tensor, shape (batch_size, node_feat_dim)
         dst_node_embeddings = self.compute_node_temporal_embeddings(node_ids=dst_node_ids, node_interact_times=node_interact_times,
+                                                                    edge_raw_features = edge_raw_features,
+                                                                    num_neighbors=num_neighbors, time_gap=time_gap)
+        # Tensor, shape (batch_size, node_feat_dim)
+        prod_node_embeddings = self.compute_node_temporal_embeddings(node_ids=prod_node_ids, node_interact_times=node_interact_times,
+                                                                    edge_raw_features = edge_raw_features,
                                                                     num_neighbors=num_neighbors, time_gap=time_gap)
 
-        return src_node_embeddings, dst_node_embeddings
+        return src_node_embeddings, dst_node_embeddings, prod_node_embeddings
 
-    def compute_node_temporal_embeddings(self, node_ids: np.ndarray, node_interact_times: np.ndarray,
+    def compute_node_temporal_embeddings(self, node_ids: torch.Tensor, node_interact_times: torch.Tensor,
+                                         edge_raw_features: torch.Tensor,
                                          num_neighbors: int = 20, time_gap: int = 2000):
         """
         given node ids node_ids, and the corresponding time node_interact_times, return the temporal embeddings of nodes in node_ids
-        :param node_ids: ndarray, shape (batch_size, ), node ids
-        :param node_interact_times: ndarray, shape (batch_size, ), node interaction times
-        :param num_neighbors: int, number of neighbors to sample for each node
-        :param time_gap: int, time gap for neighbors to compute node features
+        :param node_ids: tensor, shape (batch_size, ), node ids
+        :param node_interact_times: tensor, shape (batch_size, ), node interaction times
+        :param edge_raw_features: tensor, shape (batch_size, ), edge raw features (e.g. data.msg)
+        :param num_neighbors: NOT YET USED, int, number of neighbors to sample for each node
+        :param time_gap: NOT YET USED, int, time gap for neighbors to compute node features
         :return:
         """
         # link encoder
         # get temporal neighbors, including neighbor ids, edge ids and time information
-        # neighbor_node_ids, ndarray, shape (batch_size, num_neighbors)
-        # neighbor_edge_ids, ndarray, shape (batch_size, num_neighbors)
-        # neighbor_times, ndarray, shape (batch_size, num_neighbors)
-        neighbor_node_ids, neighbor_edge_ids, neighbor_times = \
-            self.neighbor_sampler.get_historical_neighbors(node_ids=node_ids,
-                                                           node_interact_times=node_interact_times,
-                                                           num_neighbors=num_neighbors)
+        # neighbor_node_ids, tensor, shape (batch_size, num_neighbors) 
+            # each entry in position (i,j) represents the id of the j-th dst node of src node node_ids[i] with an interaction before node_interact_times[i]
+            # ndarray, shape (batch_size, num_neighbors)
+        # neighbor_edge_ids, tensor, shape (batch_size, num_neighbors)
+        # neighbor_times, tensor, shape (batch_size, num_neighbors)
+        neighbor_node_ids, _, neighbor_edge_ids, neighbor_times = self.neighbor_sampler(node_ids)
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim)
-        nodes_edge_raw_features = self.edge_raw_features[torch.from_numpy(neighbor_edge_ids)]
+        # print(f"query (node, node) edge pair from {node_ids[7]} to {neighbor_node_ids[node_ids[7]]}")
+        # print(f"correspnding edge id is {neighbor_edge_ids[node_ids[7]]}")
+        # print(edge_raw_features.shape)
+
+        # divide by 2 since each hyperedge we insert it twice
+        nodes_edge_raw_features = edge_raw_features[torch.div(neighbor_edge_ids, 2, rounding_mode="floor")] # TODO: ensure correct indexing over multiple batches
+        # print("after divide by 2, correspnding edge id is ", (neighbor_edge_ids // 2)[node_ids[7]])
+        # print(f"its raw feature (our calc) is {nodes_edge_raw_features[node_ids[7]]}")
+
         # Tensor, shape (batch_size, num_neighbors, time_feat_dim)
-        nodes_neighbor_time_features = self.time_encoder(timestamps=torch.from_numpy(node_interact_times[:, np.newaxis] - neighbor_times).float().to(self.device))
+        # print("node_interact_times", node_interact_times[:, None].shape, node_interact_times[:, None])
+        # print("neighortimes", neighbor_times.shape, neighbor_times)
+        # print("input to time encoder", node_interact_times[:, None] - neighbor_times)
+        nodes_neighbor_time_features = self.time_encoder(timestamps=(node_interact_times[:, None] - neighbor_times).float().to(self.device))
+        # print(nodes_neighbor_time_features.shape, nodes_neighbor_time_features)
 
         # ndarray, set the time features to all zeros for the padded timestamp
-        nodes_neighbor_time_features[torch.from_numpy(neighbor_node_ids == 0)] = 0.0
+        nodes_neighbor_time_features[neighbor_node_ids == EMPTY_VALUE] = 0.0
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim + time_feat_dim)
         combined_features = torch.cat([nodes_edge_raw_features, nodes_neighbor_time_features], dim=-1)
@@ -117,19 +142,22 @@ class GraphMixer(nn.Module):
         # node encoder
         # get temporal neighbors of nodes, including neighbor ids
         # time_gap_neighbor_node_ids, ndarray, shape (batch_size, time_gap)
-        time_gap_neighbor_node_ids, _, _ = self.neighbor_sampler.get_historical_neighbors(node_ids=node_ids,
-                                                                                          node_interact_times=node_interact_times,
-                                                                                          num_neighbors=time_gap)
+        # time_gap_neighbor_node_ids, _, _ = self.neighbor_sampler.get_historical_neighbors(node_ids=node_ids,
+        #                                                                                   node_interact_times=node_interact_times,
+        #                                                                                   num_neighbors=time_gap)
+        time_gap_neighbor_node_ids = neighbor_node_ids # simplified version for nowm, assuming args.time_gap == args.num_neighbors
 
         # Tensor, shape (batch_size, time_gap, node_feat_dim)
-        nodes_time_gap_neighbor_node_raw_features = self.node_raw_features[torch.from_numpy(time_gap_neighbor_node_ids)]
+        nodes_time_gap_neighbor_node_raw_features = self.node_raw_features[time_gap_neighbor_node_ids]
 
         # Tensor, shape (batch_size, time_gap)
-        valid_time_gap_neighbor_node_ids_mask = torch.from_numpy((time_gap_neighbor_node_ids > 0).astype(np.float32))
+        valid_time_gap_neighbor_node_ids_mask = time_gap_neighbor_node_ids > 0
         # note that if a node has no valid neighbor (whose valid_time_gap_neighbor_node_ids_mask are all zero), directly set the mask to -np.inf will make the
         # scores after softmax be nan. Therefore, we choose a very large negative number (-1e10) instead of -np.inf to tackle this case
         # Tensor, shape (batch_size, time_gap)
+        valid_time_gap_neighbor_node_ids_mask = valid_time_gap_neighbor_node_ids_mask.float()
         valid_time_gap_neighbor_node_ids_mask[valid_time_gap_neighbor_node_ids_mask == 0] = -1e10
+
         # Tensor, shape (batch_size, time_gap)
         scores = torch.softmax(valid_time_gap_neighbor_node_ids_mask, dim=1).to(self.device)
 
@@ -137,25 +165,13 @@ class GraphMixer(nn.Module):
         nodes_time_gap_neighbor_node_agg_features = torch.mean(nodes_time_gap_neighbor_node_raw_features * scores.unsqueeze(dim=-1), dim=1)
 
         # Tensor, shape (batch_size, node_feat_dim), add features of nodes in node_ids
-        output_node_features = nodes_time_gap_neighbor_node_agg_features + self.node_raw_features[torch.from_numpy(node_ids)]
+        output_node_features = nodes_time_gap_neighbor_node_agg_features + self.node_raw_features[node_ids]
 
         # Tensor, shape (batch_size, node_feat_dim)
         node_embeddings = self.output_layer(torch.cat([combined_features, output_node_features], dim=1))
 
         return node_embeddings
-
-    def set_neighbor_sampler(self, neighbor_sampler: NeighborSampler):
-        """
-        set neighbor sampler to neighbor_sampler and reset the random state (for reproducing the results for uniform and time_interval_aware sampling)
-        :param neighbor_sampler: NeighborSampler, neighbor sampler
-        :return:
-        """
-        self.neighbor_sampler = neighbor_sampler
-        if self.neighbor_sampler.sample_neighbor_strategy in ['uniform', 'time_interval_aware']:
-            assert self.neighbor_sampler.seed is not None
-            self.neighbor_sampler.reset_random_state()
-
-
+    
 class FeedForwardNet(nn.Module):
 
     def __init__(self, input_dim: int, dim_expansion_factor: float, dropout: float = 0.0):
@@ -265,3 +281,33 @@ class TimeEncoder(nn.Module):
         output = torch.cos(self.w(timestamps))
 
         return output
+
+class MergeLayer(nn.Module):
+
+    def __init__(self, input_dim1: int, input_dim2: int, input_dim3: int, hidden_dim: int, output_dim: int):
+        """
+        Merge Layer to merge two inputs via: input_dim1 + input_dim2 + input_dim3 -> hidden_dim -> output_dim.
+        :param input_dim1: int, dimension of first input
+        :param input_dim2: int, dimension of the second input
+        :param input_dim3: int, dimension of the third input
+        :param hidden_dim: int, hidden dimension
+        :param output_dim: int, dimension of the output
+        """
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim1 + input_dim2 + input_dim3, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.act = nn.ReLU()
+
+    def forward(self, input_1: torch.Tensor, input_2: torch.Tensor, input_3: torch.Tensor):
+        """
+        merge and project the inputs
+        :param input_1: Tensor, shape (*, input_dim1)
+        :param input_2: Tensor, shape (*, input_dim2)
+        :param input_3: Tensor, shape (*, input_dim3)
+        :return:
+        """
+        # Tensor, shape (*, input_dim1 + input_dim2 + input_dim3)
+        x = torch.cat([input_1, input_2, input_3], dim=1)
+        # Tensor, shape (*, output_dim)
+        h = self.fc2(self.act(self.fc1(x)))
+        return h
