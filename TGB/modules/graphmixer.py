@@ -8,13 +8,13 @@ EMPTY_VALUE = -1 # same as what's filled in all attributes when resetting the ne
 
 class GraphMixer(nn.Module):
 
-    def __init__(self, node_raw_features: torch.Tensor, edge_raw_features: torch.Tensor,
+    def __init__(self, node_raw_features: torch.Tensor, edge_feat_dim: int,
                  time_feat_dim: int, num_tokens: int, num_layers: int = 2, token_dim_expansion_factor: float = 0.5,
-                 channel_dim_expansion_factor: float = 4.0, dropout: float = 0.1, device: str = 'cpu'):
+                 channel_dim_expansion_factor: float = 4.0, dropout: float = 0.1, time_gap: int = 2000, debug: bool=False):
         """
         TCL model.
         :param node_raw_features: Tensor, shape (num_nodes + 1, node_feat_dim)
-        :param edge_raw_features: Tensor, shape (num_edges + 1, edge_feat_dim)
+        :param edge_feat_dim: int, edge feature dimension (axis=1)
         # :param neighbor_sampler: neighbor sampler
         :param time_feat_dim: int, dimension of time features (encodings)
         :param num_tokens: int, number of tokens
@@ -22,23 +22,23 @@ class GraphMixer(nn.Module):
         :param token_dim_expansion_factor: float, dimension expansion factor for tokens
         :param channel_dim_expansion_factor: float, dimension expansion factor for channels
         :param dropout: float, dropout rate
-        :param device: str, device
         """
         super(GraphMixer, self).__init__()
 
-        self.node_raw_features = node_raw_features.float().to(device) # this is preset to full data features  
-        self.edge_raw_features = edge_raw_features.float() # TODO: currently not using this
+        self.node_raw_features = node_raw_features.float() # this is preset to full data features  
 
         self.neighbor_sampler = None # assigned later 
         self.node_feat_dim = self.node_raw_features.shape[1]
-        self.edge_feat_dim = self.edge_raw_features.shape[1]
+        self.edge_feat_dim = edge_feat_dim
         self.time_feat_dim = time_feat_dim
         self.num_tokens = num_tokens
         self.num_layers = num_layers
         self.token_dim_expansion_factor = token_dim_expansion_factor
         self.channel_dim_expansion_factor = channel_dim_expansion_factor
         self.dropout = dropout
-        self.device = device
+        self.num_neighbors = num_tokens
+        self.time_gap = time_gap
+        self.debug = debug
 
         self.num_channels = self.edge_feat_dim
         # in GraphMixer, the time encoding function is not trainable
@@ -54,78 +54,61 @@ class GraphMixer(nn.Module):
 
         self.output_layer = nn.Linear(in_features=self.num_channels + self.node_feat_dim, out_features=self.node_feat_dim, bias=True)
 
-    def compute_src_dst_prod_node_temporal_embeddings(self, src_node_ids: torch.Tensor, dst_node_ids: torch.Tensor, prod_node_ids: torch.Tensor,
-                                                        edge_raw_features: torch.Tensor, node_interact_times: torch.Tensor, 
-                                                        neighbor_loader: LastNeighborLoaderGraphmixer, num_neighbors: int = 20, time_gap: int = 2000):
+    def compute_src_dst_prod_node_temporal_embeddings(self, src_node_ids: torch.Tensor, dst_node_ids: torch.Tensor, prod_node_ids: torch.Tensor, node_interact_times: torch.Tensor, 
+                                                        neighbor_loader: LastNeighborLoaderGraphmixer):
         """
         compute source and destination node temporal embeddings
         :param src_node_ids: Tensor, shape (batch_size, )
         :param dst_node_ids: Tensor, shape (batch_size, )
         :param prod_node_ids: Tensor, shape (batch_size, )
-        :param edge_raw_features: Tensor, shape (batch_size, )
         :param node_interact_times: Tensor, shape (batch_size, )
-        :param num_neighbors: int, number of neighbors to sample for each node
-        :param time_gap: int, time gap for neighbors to compute node features
         :return:
         """
         self.neighbor_sampler = neighbor_loader
-        self.edge_raw_features = edge_raw_features
 
         # Tensor, shape (batch_size, node_feat_dim)
         src_node_embeddings = self.compute_node_temporal_embeddings(node_ids=src_node_ids, node_interact_times=node_interact_times,
-                                                                    edge_raw_features = edge_raw_features,
-                                                                    num_neighbors=num_neighbors, time_gap=time_gap)
+                                                                    time_gap=self.time_gap)
         # Tensor, shape (batch_size, node_feat_dim)
         dst_node_embeddings = self.compute_node_temporal_embeddings(node_ids=dst_node_ids, node_interact_times=node_interact_times,
-                                                                    edge_raw_features = edge_raw_features,
-                                                                    num_neighbors=num_neighbors, time_gap=time_gap)
+                                                                    time_gap=self.time_gap)
         # Tensor, shape (batch_size, node_feat_dim)
         prod_node_embeddings = self.compute_node_temporal_embeddings(node_ids=prod_node_ids, node_interact_times=node_interact_times,
-                                                                    edge_raw_features = edge_raw_features,
-                                                                    num_neighbors=num_neighbors, time_gap=time_gap)
+                                                                    time_gap=self.time_gap)
 
         return src_node_embeddings, dst_node_embeddings, prod_node_embeddings
 
-    def compute_node_temporal_embeddings(self, node_ids: torch.Tensor, node_interact_times: torch.Tensor,
-                                         edge_raw_features: torch.Tensor,
-                                         num_neighbors: int = 20, time_gap: int = 2000):
+    def compute_node_temporal_embeddings(self, node_ids: torch.Tensor, node_interact_times: torch.Tensor, time_gap: int = 2000):
         """
         given node ids node_ids, and the corresponding time node_interact_times, return the temporal embeddings of nodes in node_ids
         :param node_ids: tensor, shape (batch_size, ), node ids
         :param node_interact_times: tensor, shape (batch_size, ), node interaction times
-        :param edge_raw_features: tensor, shape (batch_size, ), edge raw features (e.g. data.msg)
-        :param num_neighbors: NOT YET USED, int, number of neighbors to sample for each node
         :param time_gap: NOT YET USED, int, time gap for neighbors to compute node features
         :return:
         """
-        # link encoder
-        # get temporal neighbors, including neighbor ids, edge ids and time information
+        # link encoder,
+        # get temporal neighbors, including neighbor ids, edge ids, time, and edge feature information
         # neighbor_node_ids, tensor, shape (batch_size, num_neighbors) 
             # each entry in position (i,j) represents the id of the j-th dst node of src node node_ids[i] with an interaction before node_interact_times[i]
             # ndarray, shape (batch_size, num_neighbors)
         # neighbor_edge_ids, tensor, shape (batch_size, num_neighbors)
         # neighbor_times, tensor, shape (batch_size, num_neighbors)
-        neighbor_node_ids, _, neighbor_edge_ids, neighbor_times = self.neighbor_sampler(node_ids)
+        # neighbor_edge_features, tensor, shape (batch_size, num_neighbors, edge_feat_dim)
+        neighbor_node_ids, _, neighbor_edge_ids, neighbor_times, neighbor_edge_features = self.neighbor_sampler(node_ids)
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim)
-        # print(f"query (node, node) edge pair from {node_ids[7]} to {neighbor_node_ids[node_ids[7]]}")
-        # print(f"correspnding edge id is {neighbor_edge_ids[node_ids[7]]}")
-        # print(edge_raw_features.shape)
-
-        # divide by 2 since each hyperedge we insert it twice
-        nodes_edge_raw_features = edge_raw_features[torch.div(neighbor_edge_ids, 2, rounding_mode="floor")] # TODO: ensure correct indexing over multiple batches
-        # print("after divide by 2, correspnding edge id is ", (neighbor_edge_ids // 2)[node_ids[7]])
-        # print(f"its raw feature (our calc) is {nodes_edge_raw_features[node_ids[7]]}")
-
+        nodes_edge_raw_features = neighbor_edge_features
         # Tensor, shape (batch_size, num_neighbors, time_feat_dim)
-        # print("node_interact_times", node_interact_times[:, None].shape, node_interact_times[:, None])
-        # print("neighortimes", neighbor_times.shape, neighbor_times)
-        # print("input to time encoder", node_interact_times[:, None] - neighbor_times)
-        nodes_neighbor_time_features = self.time_encoder(timestamps=(node_interact_times[:, None] - neighbor_times).float().to(self.device))
-        # print(nodes_neighbor_time_features.shape, nodes_neighbor_time_features)
+        if self.debug:
+            print("node_interact_times (shape, value)", node_interact_times[:, None].shape, node_interact_times[:, None])
+            print("neighbor_times (shape, value)", neighbor_times.shape, neighbor_times)
+            print("input to time encoder", node_interact_times[:, None] - neighbor_times)
+        nodes_neighbor_time_features = self.time_encoder(timestamps=(node_interact_times[:, None] - neighbor_times).float())
 
         # ndarray, set the time features to all zeros for the padded timestamp
         nodes_neighbor_time_features[neighbor_node_ids == EMPTY_VALUE] = 0.0
+        if self.debug:
+            print("output of time encoder (zeroed out if applicable)", nodes_neighbor_time_features.shape, nodes_neighbor_time_features)
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim + time_feat_dim)
         combined_features = torch.cat([nodes_edge_raw_features, nodes_neighbor_time_features], dim=-1)
@@ -143,23 +126,22 @@ class GraphMixer(nn.Module):
         # get temporal neighbors of nodes, including neighbor ids
         # time_gap_neighbor_node_ids, ndarray, shape (batch_size, time_gap)
         # time_gap_neighbor_node_ids, _, _ = self.neighbor_sampler.get_historical_neighbors(node_ids=node_ids,
-        #                                                                                   node_interact_times=node_interact_times,
-        #                                                                                   num_neighbors=time_gap)
-        time_gap_neighbor_node_ids = neighbor_node_ids # simplified version for nowm, assuming args.time_gap == args.num_neighbors
+        #                                                                                node_interact_times=node_interact_times,
+        #                                                                                num_neighbors=time_gap)
+        time_gap_neighbor_node_ids = neighbor_node_ids # TODO: simplified version now, assuming args.time_gap == args.num_neighbors
 
         # Tensor, shape (batch_size, time_gap, node_feat_dim)
         nodes_time_gap_neighbor_node_raw_features = self.node_raw_features[time_gap_neighbor_node_ids]
 
         # Tensor, shape (batch_size, time_gap)
-        valid_time_gap_neighbor_node_ids_mask = time_gap_neighbor_node_ids > 0
+        valid_time_gap_neighbor_node_ids_mask = (time_gap_neighbor_node_ids > 0).float()
         # note that if a node has no valid neighbor (whose valid_time_gap_neighbor_node_ids_mask are all zero), directly set the mask to -np.inf will make the
         # scores after softmax be nan. Therefore, we choose a very large negative number (-1e10) instead of -np.inf to tackle this case
         # Tensor, shape (batch_size, time_gap)
-        valid_time_gap_neighbor_node_ids_mask = valid_time_gap_neighbor_node_ids_mask.float()
         valid_time_gap_neighbor_node_ids_mask[valid_time_gap_neighbor_node_ids_mask == 0] = -1e10
 
         # Tensor, shape (batch_size, time_gap)
-        scores = torch.softmax(valid_time_gap_neighbor_node_ids_mask, dim=1).to(self.device)
+        scores = torch.softmax(valid_time_gap_neighbor_node_ids_mask, dim=1)
 
         # Tensor, shape (batch_size, node_feat_dim), average over the time_gap neighbors
         nodes_time_gap_neighbor_node_agg_features = torch.mean(nodes_time_gap_neighbor_node_raw_features * scores.unsqueeze(dim=-1), dim=1)

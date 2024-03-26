@@ -4,7 +4,6 @@ Neighbor Loader
 Reference:
     - https://pytorch-geometric.readthedocs.io/en/latest/_modules/torch_geometric/nn/models/tgn.html
 """
-
 import copy
 from typing import Callable, Dict, Tuple
 
@@ -109,17 +108,19 @@ class LastNeighborLoaderTime:
         a. we only return neighbors instead of a set of both neighbors and nodes
         b. we maintain the same info storage approach in insert(), contrary to the storage approach in TGBBaseline
     '''
-    def __init__(self, num_nodes: int, size: int, device=None):
+    def __init__(self, num_nodes: int, size: int, edge_feat_dim: int, device=None):
         self.size = size # num_neighbors
 
         self.neighbors = torch.empty((num_nodes, size), dtype=torch.long, device=device)
         self.e_id = torch.empty((num_nodes, size), dtype=torch.long, device=device)
         self.t_id = torch.empty((num_nodes, size), dtype=torch.long, device=device)
+        self.msg = torch.empty((num_nodes, size, edge_feat_dim), dtype=torch.float, device=device)
         self._assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
+        self.edge_feat_dim = edge_feat_dim
 
         self.reset_state()
 
-    def __call__(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    def __call__(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         '''
         Inputs
         :param n_id: tensor, shape (batch_size, )
@@ -127,25 +128,28 @@ class LastNeighborLoaderTime:
         :param neighbors: tensor, shape (batch_size, size)
         :param e_id: tensor, shape (batch_size, size)
         :param t_id: tensor, shape (batch_size, size)
+        :param msg: tensor, shape (batch_size, size, self.edge_feat_dim)
         '''
         neighbors = self.neighbors[n_id]
         nodes = n_id.view(-1, 1).repeat(1, self.size)
         e_id = self.e_id[n_id]
         t_id = self.t_id[n_id]
+        msg = self.msg[n_id]
 
         # Filter invalid neighbors (identified by `e_id < 0`).
         mask = e_id < 0
         neighbors[mask] = EMPTY_VALUE
         e_id[mask] = EMPTY_VALUE
         t_id[mask] = EMPTY_VALUE
+        msg[mask] = EMPTY_VALUE
 
         # Relabel node indices. # NOT NEEDED IN THIS VERSION
         # n_id = torch.cat([n_id.unique(), neighbors.unique()]).unique()
         # self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
         # neighbors, nodes = self._assoc[neighbors], self._assoc[nodes]
-        return neighbors, None, e_id, t_id
+        return neighbors, None, e_id, t_id, msg
 
-    def insert(self, src: Tensor, dst: Tensor, t: Tensor):
+    def insert(self, src: Tensor, dst: Tensor, t: Tensor, msg: Tensor):
         # Inserts newly encountered interactions into an ever-growing
         # (undirected) temporal graph.
 
@@ -156,12 +160,13 @@ class LastNeighborLoaderTime:
             self.cur_e_id, self.cur_e_id + src.size(0), device=src.device
         ).repeat(2)
         t_id = t.repeat(2)
+        msg = msg.repeat(2, 1)
         self.cur_e_id += src.numel()
 
         # Convert newly encountered interaction ids so that they point to
         # locations of a "dense" format of shape [num_nodes, size].
         nodes, perm = nodes.sort()
-        neighbors, e_id, t_id = neighbors[perm], e_id[perm], t_id[perm]
+        neighbors, e_id, t_id, msg = neighbors[perm], e_id[perm], t_id[perm], msg[perm]
 
         n_id = nodes.unique()
         self._assoc[n_id] = torch.arange(n_id.numel(), device=n_id.device)
@@ -176,6 +181,10 @@ class LastNeighborLoaderTime:
         dense_t_id = t_id.new_full((n_id.numel() * self.size,), -1)
         dense_t_id[dense_id] = t_id
         dense_t_id = dense_t_id.view(-1, self.size)
+        
+        dense_msg = msg.new_full((n_id.numel() * self.size, self.edge_feat_dim, ), -1)
+        dense_msg[dense_id] = msg
+        dense_msg = dense_msg.view(-1, self.size, self.edge_feat_dim)
 
         dense_neighbors = e_id.new_empty(n_id.numel() * self.size)
         dense_neighbors[dense_id] = neighbors
@@ -184,6 +193,9 @@ class LastNeighborLoaderTime:
         # Collect new and old interactions...
         e_id = torch.cat([self.e_id[n_id, : self.size], dense_e_id], dim=-1)
         t_id = torch.cat([self.t_id[n_id, : self.size], dense_t_id], dim=-1)
+        msg = torch.cat(
+            [self.msg[n_id, : self.size], dense_msg], dim=-2
+        )
         neighbors = torch.cat(
             [self.neighbors[n_id, : self.size], dense_neighbors], dim=-1
         )
@@ -193,7 +205,9 @@ class LastNeighborLoaderTime:
         # And sort them based on `t_id`, used to be based on `e_id` for TGNPL
         e_id, perm = e_id.topk(self.size, dim=-1) # returns the largest elements 
         self.e_id[n_id] = e_id
-        self.t_id[n_id] = torch.gather(t_id, 1, perm)
+        self.t_id[n_id] = torch.gather(t_id, 1, perm)        
+        msg_perm = perm.unsqueeze(-1).repeat(1, 1, self.edge_feat_dim) # torch.gather requires index.shape==input.shape regardless of dim
+        self.msg[n_id] = torch.gather(msg, 1, msg_perm)
         self.neighbors[n_id] = torch.gather(neighbors, 1, perm)
 
     def reset_state(self):
@@ -201,20 +215,22 @@ class LastNeighborLoaderTime:
         self.neighbors.fill_(EMPTY_VALUE)
         self.e_id.fill_(EMPTY_VALUE)
         self.t_id.fill_(EMPTY_VALUE)
+        self.msg.fill_(EMPTY_VALUE)
+        
 
 class LastNeighborLoaderGraphmixer(LastNeighborLoaderTime):
-    def __init__(self, num_nodes: int, size: int, device=None):
-        super().__init__(num_nodes, size, device) 
+    def __init__(self, num_nodes: int, size: int, edge_feat_dim: int, device=None):
+        super().__init__(num_nodes, size, edge_feat_dim, device) 
 
     # def __call__(self, f_id: Tensor, p_id: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         # n_id = torch.cat([f_id, p_id])
         # return super().__call__(n_id)
-    def __call__(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    def __call__(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         return super().__call__(n_id)
 
-    def insert(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor):
+    def insert(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, msg: Tensor):
         for i in range(src.size()[0]):  
-            super().insert(src[i:i+1], prod[i:i+1], t[i:i+1])
-            super().insert(dst[i:i+1], prod[i:i+1], t[i:i+1])
+            super().insert(src[i:i+1], prod[i:i+1], t[i:i+1], msg[i:i+1])
+            super().insert(dst[i:i+1], prod[i:i+1], t[i:i+1], msg[i:i+1])
     def reset_state(self):
         return super().reset_state()

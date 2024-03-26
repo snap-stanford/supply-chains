@@ -36,6 +36,11 @@ from modules.inventory_module import TGNPLInventory
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPredDatasetHyper
 
+# To prevent CUDA device side assertion bug
+import os
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+
 # ===========================================
 # == Main functions to train and test model
 # ===========================================
@@ -72,16 +77,6 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     
     pos_src, pos_prod, pos_dst, pos_t, pos_msg = batch.src, batch.prod, batch.dst, batch.t, batch.msg
 
-    # Debug: go through data points to ensure correctness of edge feature indexing
-    # filtered_pairs = [(s, d, p, m) for s, d, p, m in zip(src, dst, prod, msg) if s == 7 or d == 7 or p == 7]
-    # print("raw messages are (s, d, p, m)", [m for m in msg if m==-1.7519])
-    # print("minimum of prod", min(pos_prod))
-    # print("shape of pos_src", pos_src.shape)
-    # for key in range(pos_src.shape[0]):
-    #     if (pos_src[key]==7 or pos_dst[key]==7) and pos_prod[key]==115 and pos_t[key]==4:
-    #         print("key in raw is", key)
-    # key = 126
-    # print(f"raw messages at {key}", pos_src[key], pos_dst[key], pos_prod[key], pos_msg[key])
     bs = len(pos_src)  # batch size
     
     if neg_sampler is None:
@@ -146,13 +141,10 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     # Note: we don't call .unique() here over the batch, so we input the format (batch_size, ?)
     batch_src_node_embeddings, batch_dst_node_embeddings, batch_prod_node_embeddings = \
                 model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
-                                                                    dst_node_ids=dst,
-                                                                    prod_node_ids=prod,
-                                                                    edge_raw_features=pos_msg,
-                                                                    node_interact_times=t,
-                                                                    neighbor_loader=neighbor_loader,
-                                                                    num_neighbors=args.num_neighbors, 
-                                                                    time_gap=args.time_gap)
+                                                                                dst_node_ids=dst,
+                                                                                prod_node_ids=prod,
+                                                                                node_interact_times=t,
+                                                                                neighbor_loader=neighbor_loader)
     # f_id = torch.cat([src, dst]).unique()
     # p_id = torch.cat([prod]).unique()
     # n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
@@ -280,6 +272,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         
         # three losses: logits loss from link prediction, inventory loss, and memory update loss
         loss = logits_loss + inv_loss + update_loss
+        print(f"loss in this batch is {loss}")
         total_loss += float(loss) * batch.num_events  # scale by batch size
         total_logits_loss += float(logits_loss) * batch.num_events
         total_inv_loss += float(inv_loss) * batch.num_events
@@ -290,7 +283,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         
         # Update memory and neighbor loader with ground-truth transactions
         # model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
-        neighbor_loader.insert(batch.src, batch.dst, batch.prod, batch.t)
+        neighbor_loader.insert(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
                 
         # Update model parameters with backprop
         if update_params:
@@ -339,7 +332,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         y_pred, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products,
-                                       use_prev_sampling = use_prev_sampling)
+                                       use_prev_sampling=use_prev_sampling)
         input_dict = {
             "y_pred_pos": y_pred[:, :1],
             "y_pred_neg": y_pred[:, 1:],
@@ -350,7 +343,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
 
         # Update memory and neighbor loader with ground-truth state.
         # model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
-        neighbor_loader.insert(batch.src, batch.dst, batch.prod, batch.t)
+        neighbor_loader.insert(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
     
     num = (torch.tensor(perf_list) * torch.tensor(batch_size)).sum()
     denom = torch.tensor(batch_size).sum()
@@ -466,10 +459,10 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     num_nodes = num_firms + num_products
 
     # initialize graphmixer module
-    node_raw_features = torch.eye(num_nodes) # since node features is None here, one_hot encoding of node id
-    edge_raw_features = data.msg
-    graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features,
-                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, device=device).to(device) # TODO: duplicated device
+    node_raw_features = torch.eye(num_nodes).to(device) # since node features is None here, one_hot encoding of node id
+    edge_feat_dim = data.msg.shape[1]
+    graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
+                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap).to(device) 
 
     # initialize decoder
     link_pred = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1], input_dim3=node_raw_features.shape[1], 
@@ -618,7 +611,7 @@ def run_experiment(args):
             raise Exception('Failed to initialize model with weights')
             
     # Initialize neighbor loader
-    neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, size=args.num_neighbors, device=device)
+    neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, size=args.num_neighbors, edge_feat_dim=data.msg.shape[1], device=device)
 
     print("==========================================================")
     print(f"=================*** {MODEL_NAME}: LinkPropPred: {args.dataset} ***=============")
