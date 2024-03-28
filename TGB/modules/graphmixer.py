@@ -145,6 +145,8 @@ class GraphMixer(nn.Module):
 
         # Tensor, shape (batch_size, node_feat_dim), average over the time_gap neighbors
         nodes_time_gap_neighbor_node_agg_features = torch.mean(nodes_time_gap_neighbor_node_raw_features * scores.unsqueeze(dim=-1), dim=1)
+        if self.debug:
+            print("print nodes_time_gap_neighbor_node_agg_features (expect the same across axis=0 for empty graph)", nodes_time_gap_neighbor_node_agg_features)
 
         # Tensor, shape (batch_size, node_feat_dim), add features of nodes in node_ids
         output_node_features = nodes_time_gap_neighbor_node_agg_features + self.node_raw_features[node_ids]
