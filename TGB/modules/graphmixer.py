@@ -10,7 +10,8 @@ class GraphMixer(nn.Module):
 
     def __init__(self, node_raw_features: torch.Tensor, edge_feat_dim: int,
                  time_feat_dim: int, num_tokens: int, num_layers: int = 2, token_dim_expansion_factor: float = 0.5,
-                 channel_dim_expansion_factor: float = 4.0, dropout: float = 0.1, time_gap: int = 2000, debug: bool=False):
+                 channel_dim_expansion_factor: float = 4.0, dropout: float = 0.1, time_gap: int = 2000, 
+                 debug: bool=False, mimic_static_debug: bool=False): # TODO: delete debug flag
         """
         TCL model.
         :param node_raw_features: Tensor, shape (num_nodes + 1, node_feat_dim)
@@ -39,6 +40,7 @@ class GraphMixer(nn.Module):
         self.num_neighbors = num_tokens
         self.time_gap = time_gap
         self.debug = debug
+        self.mimic_static_debug = mimic_static_debug # TODO: delete debug flag
 
         self.num_channels = self.edge_feat_dim
         # in GraphMixer, the time encoding function is not trainable
@@ -150,6 +152,9 @@ class GraphMixer(nn.Module):
 
         # Tensor, shape (batch_size, node_feat_dim), add features of nodes in node_ids
         output_node_features = nodes_time_gap_neighbor_node_agg_features + self.node_raw_features[node_ids]
+        
+        if self.mimic_static_debug:
+            output_node_features = self.node_raw_features[node_ids]
 
         # Tensor, shape (batch_size, node_feat_dim)
         node_embeddings = self.output_layer(torch.cat([combined_features, output_node_features], dim=1))
@@ -266,32 +271,32 @@ class TimeEncoder(nn.Module):
 
         return output
 
-class MergeLayer(nn.Module):
+# class MergeLayer(nn.Module):
 
-    def __init__(self, input_dim1: int, input_dim2: int, input_dim3: int, hidden_dim: int, output_dim: int):
-        """
-        Merge Layer to merge two inputs via: input_dim1 + input_dim2 + input_dim3 -> hidden_dim -> output_dim.
-        :param input_dim1: int, dimension of first input
-        :param input_dim2: int, dimension of the second input
-        :param input_dim3: int, dimension of the third input
-        :param hidden_dim: int, hidden dimension
-        :param output_dim: int, dimension of the output
-        """
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim1 + input_dim2 + input_dim3, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-        self.act = nn.ReLU()
+#     def __init__(self, input_dim1: int, input_dim2: int, input_dim3: int, hidden_dim: int, output_dim: int):
+#         """
+#         Merge Layer to merge two inputs via: input_dim1 + input_dim2 + input_dim3 -> hidden_dim -> output_dim.
+#         :param input_dim1: int, dimension of first input
+#         :param input_dim2: int, dimension of the second input
+#         :param input_dim3: int, dimension of the third input
+#         :param hidden_dim: int, hidden dimension
+#         :param output_dim: int, dimension of the output
+#         """
+#         super().__init__()
+#         self.fc1 = nn.Linear(input_dim1 + input_dim2 + input_dim3, hidden_dim)
+#         self.fc2 = nn.Linear(hidden_dim, output_dim)
+#         self.act = nn.ReLU()
 
-    def forward(self, input_1: torch.Tensor, input_2: torch.Tensor, input_3: torch.Tensor):
-        """
-        merge and project the inputs
-        :param input_1: Tensor, shape (*, input_dim1)
-        :param input_2: Tensor, shape (*, input_dim2)
-        :param input_3: Tensor, shape (*, input_dim3)
-        :return:
-        """
-        # Tensor, shape (*, input_dim1 + input_dim2 + input_dim3)
-        x = torch.cat([input_1, input_2, input_3], dim=1)
-        # Tensor, shape (*, output_dim)
-        h = self.fc2(self.act(self.fc1(x)))
-        return h
+#     def forward(self, input_1: torch.Tensor, input_2: torch.Tensor, input_3: torch.Tensor):
+#         """
+#         merge and project the inputs
+#         :param input_1: Tensor, shape (*, input_dim1)
+#         :param input_2: Tensor, shape (*, input_dim2)
+#         :param input_3: Tensor, shape (*, input_dim3)
+#         :return:
+#         """
+#         # Tensor, shape (*, input_dim1 + input_dim2 + input_dim3)
+#         x = torch.cat([input_1, input_2, input_3], dim=1)
+#         # Tensor, shape (*, output_dim)
+#         h = self.fc2(self.act(self.fc1(x)))
+#         return h

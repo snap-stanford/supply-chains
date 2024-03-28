@@ -26,7 +26,7 @@ from tgb.linkproppred.logger import TensorboardLogger
 from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
 from modules.graphmixer import GraphMixer, MergeLayer
-# from modules.decoder import LinkPredictorTGNPL
+from modules.decoder import LinkPredictorTGNPL
 from modules.emb_module import *
 # from modules.msg_func import TGNPLMessage
 # from modules.msg_agg import MeanAggregator
@@ -272,7 +272,6 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         
         # three losses: logits loss from link prediction, inventory loss, and memory update loss
         loss = logits_loss + inv_loss + update_loss
-        print(f"loss in this batch is {loss}")
         total_loss += float(loss) * batch.num_events  # scale by batch size
         total_logits_loss += float(logits_loss) * batch.num_events
         total_inv_loss += float(inv_loss) * batch.num_events
@@ -447,7 +446,7 @@ PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
 NUM_FIRMS = -1
 NUM_PRODUCTS = -1    
     
-def set_up_model(args, data, device, num_firms=None, num_products=None):
+def set_up_model(args, data, device, num_firms=None, num_products=None, mimic_static_debug=False): # TODO: delete debug flag
     """
     Initialize model modules based on args.
     """
@@ -462,11 +461,12 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     node_raw_features = torch.eye(num_nodes).to(device) # since node features is None here, one_hot encoding of node id
     edge_feat_dim = data.msg.shape[1]
     graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
-                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap).to(device) 
+                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, mimic_static_debug=mimic_static_debug).to(device) # TODO: delete debug flag
 
-    # initialize decoder
-    link_pred = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1], input_dim3=node_raw_features.shape[1], 
-                            hidden_dim=node_raw_features.shape[1], output_dim=1).to(device)
+    # initialize 
+#     link_pred = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1], input_dim3=node_raw_features.shape[1], 
+#                             hidden_dim=node_raw_features.shape[1], output_dim=1).to(device)
+    link_pred = LinkPredictorTGNPL(in_channels=node_raw_features.shape[1]).to(device) # exactly the same as MergeLayer
 
     # put together in model and initialize optimizer
     model = {'graphmixer': graphmixer,
