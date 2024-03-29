@@ -25,7 +25,7 @@ from torch_geometric.nn import TransformerConv
 from tgb.linkproppred.logger import TensorboardLogger
 from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
-from modules.graphmixer import GraphMixer, MergeLayer
+from modules.graphmixer import GraphMixer
 from modules.decoder import LinkPredictorTGNPL
 from modules.emb_module import *
 # from modules.msg_func import TGNPLMessage
@@ -161,9 +161,9 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     # )
     # y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
 
-    y_pred = model['link_pred'](input_1=batch_src_node_embeddings, 
-                                input_2=batch_dst_node_embeddings,
-                                input_3=batch_prod_node_embeddings).squeeze(dim=-1).sigmoid()
+    y_pred = model['link_pred'](batch_src_node_embeddings, 
+                                batch_dst_node_embeddings,
+                                batch_prod_node_embeddings).squeeze(dim=-1)
     y_pred = y_pred.reshape(bs, num_samples)
     update_loss = 0 # TODO: what's update loss for graphmixer? 
     return y_pred, update_loss
@@ -466,7 +466,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None, mimic_st
     # initialize 
 #     link_pred = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1], input_dim3=node_raw_features.shape[1], 
 #                             hidden_dim=node_raw_features.shape[1], output_dim=1).to(device)
-    link_pred = LinkPredictorTGNPL(in_channels=node_raw_features.shape[1]).to(device) # exactly the same as MergeLayer
+    link_pred = LinkPredictorTGNPL(node_raw_features.shape[1]).to(device) # exactly the same as MergeLayer
 
     # put together in model and initialize optimizer
     model = {'graphmixer': graphmixer,
