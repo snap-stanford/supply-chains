@@ -355,7 +355,7 @@ def get_tgnpl_args():
     parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
     parser.add_argument('--bs', type=int, help='Batch size', default=200)
     parser.add_argument('--k_value', type=int, help='k_value for computing ranking metrics', default=10)
-    parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=50)
+    parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
     parser.add_argument('--seed', type=int, help='Random seed', default=1)
     parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=100)
     parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
@@ -377,6 +377,7 @@ def get_tgnpl_args():
     parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
     parser.add_argument('--train_on_val', type=bool, default=False, help='If true, train on validation set with fixed negative sampled; used for debugging')
     parser.add_argument('--train_with_fixed_samples', default=False, action="store_true", help='If true, use fixed negative samples for training')
+    parser.add_argument('--test_per_epoch', default=False, action="store_true", help='If true, evaluate MRR on test every epoch')
     parser.add_argument('--use_prev_sampling', action='store_true', help = "if true, use previous hypergraph sampling method")
     
     try:
@@ -636,6 +637,7 @@ def run_experiment(args):
         # ==================================================== Train & Validation
         train_loss_list = []
         val_perf_list = []
+        test_perf_list = []
         start_train_val = timeit.default_timer()
         for epoch in range(1, args.num_epoch + 1):
             start_epoch_train = timeit.default_timer()
@@ -673,6 +675,17 @@ def run_experiment(args):
             print(f"\tValidation {metric}: {perf_metric_val: .4f}")
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
             val_perf_list.append(perf_metric_val)
+            
+            # test
+            if args.test_per_epoch:
+                start_test = timeit.default_timer()
+                dataset.load_test_ns()  # load test negative samples
+                perf_metric_test = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
+                                       device, split_mode="test", metric=metric, use_prev_sampling=args.use_prev_sampling)
+                time_test = timeit.default_timer() - start_test
+                print(f"\tTest {metric}: {perf_metric_test: .4f}")
+                print(f"\tTest: Elapsed time (s): {time_test: .4f}")
+                test_perf_list.append(perf_metric_test)
 
             # log metrics to tensorboard
             if args.tensorboard:
@@ -704,8 +717,9 @@ def run_experiment(args):
                   'run': run_idx,
                   'seed': args.seed,
                   'train loss': train_loss_list,
-                  f'val {metric}': val_perf_list,}, 
-                    results_filename, replace_file=True)
+                  f'val {metric}': val_perf_list,
+                  f'test {metric}': test_perf_list}, 
+                  results_filename, replace_file=True)
 
             # check if best on val so far, save if so, stop if no improvement observed for a while
             if early_stopper.step_check(perf_metric_val, model):
@@ -723,11 +737,16 @@ def run_experiment(args):
         print(f"Train & Validation: Elapsed Time (s): {train_val_time: .4f}")
 
         # ==================================================== Test
-        early_stopper.load_checkpoint(model)  # load the best model
-        dataset.load_test_ns()  # load test negatives
-        start_test = timeit.default_timer()
-        perf_metric_test = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
-                                device, split_mode="test", metric=metric, use_prev_sampling=args.use_prev_sampling)
+        if args.test_per_epoch:
+            # we already ran test every epoch, just get test metric from best val
+            perf_metric_test = test_perf_list[np.argmax(val_perf_list)]
+        else:
+            early_stopper.load_checkpoint(model)  # load the best model
+            dataset.load_test_ns()  # load test negatives
+            start_test = timeit.default_timer()
+            perf_metric_test = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
+                                    device, split_mode="test", metric=metric, 
+                                    use_prev_sampling=args.use_prev_sampling)
 
         print(f"INFO: Test: Evaluation Setting: >>> ONE-VS-MANY <<< ")
         print(f"\tTest: {metric}: {perf_metric_test: .4f}")
@@ -757,7 +776,7 @@ def run_experiment(args):
                       'seed': args.seed,
                       'train loss': train_loss_list,
                       f'val {metric}': val_perf_list,
-                      f'test {metric}': perf_metric_test,
+                      f'test {metric}': test_per_list if args.test_per_epoch else perf_metric_test,
                       'test_time': test_time,
                       'tot_train_val_time': train_val_time
                       }, 

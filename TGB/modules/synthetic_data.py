@@ -139,13 +139,16 @@ def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, se
     """
     np.random.seed(seed)
     exog_prods = sorted(set(prod_graph.source.values) - set(prod_graph.dest.values))  # exog products, only used as input
-    expected_num_shocks = len(exog_prods) * num_timesteps * shock_prob
+    if shock_probs is None:
+        expected_num_shocks = len(exog_prods) * num_timesteps * shock_prob
+    else:
+        expected_num_shocks = np.sum(len(exog_prods) * shock_probs)
     print(f'Found {len(exog_prods)} exogenous products -> expected num shocks = {expected_num_shocks:0.3f}')
     # default_supply = shock_supply * recovery_rate^k 
     # log default_supply = log shock_supply + k log recovery_rate
     # (log default_supply - log shock_supply) / log recovery_rate = k
     time_to_recovery = (np.log(default_supply) - np.log(shock_supply)) / np.log(recovery_rate)
-    print(f'Recovery rate = {recovery_rate} -> num timesteps to recovery = {time_to_recovery: 0.2f}')
+    print(f'Default supply = {default_supply}, shock supply = {shock_supply}, recovery rate = {recovery_rate} -> timesteps to recovery = {time_to_recovery: 0.2f}')
     
     prod2supply = {p:default_supply for p in exog_prods}
     exog_schedule = {}  # t -> (firm, product) -> supply
@@ -597,14 +600,14 @@ def measure_temporal_variation_in_triplets(transactions, verbose=False):
     plt.grid(alpha=0.2)
     plt.show()
     
-def check_negative_sampling(data_name, neg_samples=18):
+def check_negative_sampling(data_name, neg_samples=18, split='val'):
     """
     Check results from negative sampling.
     """
     data_dir = f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{data_name.replace('-', '_')}/"
-    with open(os.path.join(data_dir, f'{data_name}_val_ns.pkl'), 'rb') as f:
-        val_ns = pickle.load(f)
     edgelist_df = pd.read_csv(os.path.join(data_dir, f'{data_name}_edgelist.csv'))
+    with open(os.path.join(data_dir, f'{data_name}_{split}_ns.pkl'), 'rb') as f:
+        eval_ns = pickle.load(f)
     with open(os.path.join(data_dir, f'{data_name}_meta.json'), 'r') as f:
         meta = json.load(f)
 
@@ -617,20 +620,30 @@ def check_negative_sampling(data_name, neg_samples=18):
 
     train_triples = set(zip(train_df['source'].values, train_df['target'].values, train_df['product'].values))
     print(f'{len(train_triples)} unique train triples')
-    val_tuples = set(zip(val_df['source'].values, val_df['target'].values, 
-                         val_df['product'].values, val_df['ts'].values))
-    assert len(val_ns) == len(val_df), len(val_ns)
+    if split == 'train':
+        eval_keys = set(zip(train_df['source'].values, train_df['target'].values, 
+                            train_df['product'].values, train_df['ts'].values))
+        assert len(eval_ns) == len(train_df)
+    elif split == 'val':
+        eval_keys = set(zip(val_df['source'].values, val_df['target'].values, 
+                            val_df['product'].values, val_df['ts'].values))
+        assert len(eval_ns) == len(val_df)
+    else:
+        eval_keys = set(zip(test_df['source'].values, test_df['target'].values, 
+                            test_df['product'].values, test_df['ts'].values))
+        assert len(eval_ns) == len(test_df)
+
     num_historicals = []
     num_overlap_historicals = []
-    for pos, negs in val_ns.items():
-        assert pos in val_tuples
+    for pos, negs in eval_ns.items():
+        assert pos in eval_keys
         n_historical = 0
         n_perturb = 0
         n_overlap_historical = 0
         negs = [tuple(negs[i]) for i in range(neg_samples)]  # convert to list of tuples
         assert len(set(negs)) == neg_samples  # should be unique
         for neg in negs:
-            assert (neg[0], neg[1], neg[2], pos[-1]) not in val_tuples
+            assert (neg[0], neg[1], neg[2], pos[-1]) not in eval_keys
             overlap = np.sum([int(pos[i] == neg[i]) for i in range(3)])
             if neg in train_triples:
                 n_historical += 1
@@ -645,11 +658,11 @@ def check_negative_sampling(data_name, neg_samples=18):
 
     for i in sorted(set(num_historicals)):
         num_data_points = np.sum(np.array(num_historicals) == i)
-        print(f'Num historicals = {i} -> {num_data_points}')
+        print(f'Num historicals = {i} -> {num_data_points} ({num_data_points/len(eval_ns):0.3f})')
         
     for i in sorted(set(num_overlap_historicals)):
         num_data_points = np.sum(np.array(num_overlap_historicals) == i)
-        print(f'Num overlap historicals = {i} -> {num_data_points}')
+        print(f'Num overlap historicals = {i} -> {num_data_points} ({num_data_points/len(eval_ns):0.3f})')
         
 
 ###################################################
