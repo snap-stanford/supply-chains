@@ -33,7 +33,7 @@ from modules.neighbor_loader import LastNeighborLoaderTGNPL
 from modules.memory_module import TGNPLMemory, StaticMemory
 from modules.inventory_module import TGNPLInventory
 from modules.early_stopping import  EarlyStopMonitor
-from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDataset, PyGLinkPropPredDatasetHyper
+from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper, TimeSpecificDataLoader
 
 # ===========================================
 # == Main functions to train and test model
@@ -352,22 +352,21 @@ def get_tgnpl_args():
     """
     parser = argparse.ArgumentParser('*** TGB ***')
     parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
+    parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
+    parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
     parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
     parser.add_argument('--bs', type=int, help='Batch size', default=200)
-    parser.add_argument('--k_value', type=int, help='k_value for computing ranking metrics', default=10)
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
     parser.add_argument('--seed', type=int, help='Random seed', default=1)
     parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=100)
     parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
     parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=100)
+    parser.add_argument('--num_neighbors', type=int, help='Number of neighbors to store in NeighborLoader', default=10)
     parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
-    parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1, choices=[1])
+    parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
     parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
     parser.add_argument('--tensorboard', type=bool, help='Tensorboard support', default=False)
-    parser.add_argument('--bipartite', type=bool, help='Whether to use bipartite graph', default=False)
-    parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
-    parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
     parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory module', default=False)
     parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for inventory loss', default=10)
     parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for inventory loss', default=1)
@@ -417,7 +416,6 @@ def get_unique_id_for_experiment(args):
 # ===========================================
 # Global variables
 MODEL_NAME = 'TGNPL'
-NUM_NEIGHBORS = 10
 #PATH_TO_DATASETS = f'/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
 TGB_DIRECTORY = "/".join(str(__file__).split("/")[:-4])
 PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
@@ -527,6 +525,7 @@ def set_up_data(args, data, dataset):
     train_loader = TemporalDataLoader(train_data, batch_size=args.bs)
     val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
     test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
+    
     return train_loader, val_loader, test_loader
     
 def run_experiment(args):
@@ -557,7 +556,7 @@ def run_experiment(args):
         )
         config = wandb.config
     if args.wandb:
-        wandb.summary["num_neighbors"] = NUM_NEIGHBORS
+        wandb.summary["num_neighbors"] = args.num_neighbors
         wandb.summary["model_name"] = MODEL_NAME
         
     # Set up paths for saving results and model weights
@@ -617,7 +616,7 @@ def run_experiment(args):
                 raise Exception('Failed to initialize model with weights')
     
     # Initialize neighbor loader
-    neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=NUM_NEIGHBORS, device=device)
+    neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=args.num_neighbors, device=device)
 
     print("==========================================================")
     print(f"=================*** {MODEL_NAME}: LinkPropPred: {args.dataset} ***=============")
@@ -754,7 +753,7 @@ def run_experiment(args):
         print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
         if args.tensorboard:
             hparam_dict = vars(args)
-            hparam_dict.update({"num_neighbors": NUM_NEIGHBORS,
+            hparam_dict.update({"num_neighbors": args.num_neighbors,
                                 "model_name": MODEL_NAME, 
                                 "metric": metric})
             metric_dict = {
@@ -776,7 +775,7 @@ def run_experiment(args):
                       'seed': args.seed,
                       'train loss': train_loss_list,
                       f'val {metric}': val_perf_list,
-                      f'test {metric}': test_per_list if args.test_per_epoch else perf_metric_test,
+                      f'test {metric}': test_perf_list if args.test_per_epoch else perf_metric_test,
                       'test_time': test_time,
                       'tot_train_val_time': train_val_time
                       }, 
