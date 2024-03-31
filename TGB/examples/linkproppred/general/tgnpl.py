@@ -25,7 +25,7 @@ from torch_geometric.nn import TransformerConv
 from tgb.linkproppred.logger import TensorboardLogger
 from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
-from modules.decoder import LinkPredictorTGNPL
+from modules.decoder import DecoderTGNPL
 from modules.emb_module import *
 from modules.msg_func import TGNPLMessage
 from modules.msg_agg import MeanAggregator
@@ -33,14 +33,15 @@ from modules.neighbor_loader import LastNeighborLoaderTGNPL
 from modules.memory_module import TGNPLMemory, StaticMemory
 from modules.inventory_module import TGNPLInventory
 from modules.early_stopping import  EarlyStopMonitor
-from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper, TimeSpecificDataLoader
+from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper
 
 # ===========================================
 # == Main functions to train and test model
 # ===========================================
 def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                           ns_samples=6, neg_sampler=None, split_mode="val",
-                          num_firms=None, num_products=None, use_prev_sampling=False):
+                          num_firms=None, num_products=None, use_prev_sampling=False,
+                          predict_amount=True):
     """
     Get model scores for a batch's positive edges and its corresponding negative samples.
     If neg_sampler is None, sample negative samples at random.
@@ -57,8 +58,11 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
         use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
                             (that is, without correction to the loose negatives on Oct 24)
+        predict_amount: whether to also predict amount for positive edges
     Returns:
-        y_pred: shape is (batch size) x (1 + 3*ns_samples)
+        y_link_pred: shape is (batch size) x (1 + 3*ns_samples)
+        y_amt_pred: shape is (batch size) x 1 if predict_amount is True; else, None
+        update_loss: Tensor float
     """
     # use global variables when arguments are not specified
     if num_firms is None:
@@ -144,9 +148,15 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         repeat_tensor(data.msg, 2)[e_id].to(device),
     )
 
-    y_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
-    y_pred = y_pred.reshape(bs, num_samples)
-    return y_pred, update_loss
+    y_link_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
+    y_link_pred = y_link_pred.reshape(bs, num_samples)
+    
+    if predict_amount:
+        y_amt_pred = model['amount_pred'](z[assoc[pos_src]], z[assoc[pos_dst]], z[assoc[pos_prod]])
+        assert y_amt_pred.shape == (bs, 1)
+        return y_link_pred, y_amt_pred, update_loss
+    return y_link_pred, None, update_loss
+    
     
 def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                        num_firms=None, num_products=None):
@@ -182,7 +192,7 @@ def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devi
 
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
-          loss_name='ce-softmax', update_params=True, 
+          loss_name='ce-softmax', amt_loss_weight=1, update_params=True, 
           ns_samples=6, neg_sampler=None, split_mode="val",
           num_firms=None, num_products=None, use_prev_sampling=False):
     """
@@ -217,47 +227,52 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
     model['memory'].reset_state()  # Start with a fresh memory.
     neighbor_loader.reset_state()  # Start with an empty graph.
     
-    if loss_name == 'ce-softmax':
-        # softmax then cross entropy
-        criterion = torch.nn.CrossEntropyLoss() 
-    else:
-        # sigmoid then binary cross entropy, used in TGB
-        criterion = torch.nn.BCEWithLogitsLoss()
-    
-    total_loss, total_logits_loss, total_inv_loss, total_debt_loss, total_consump_rwd_loss, total_update_loss, total_num_events = 0, 0, 0, 0, 0, 0, 0
+    loss_types = ['loss', 'link_loss', 'amt_loss', 'inv_loss', 'debt_loss', 'consump_rwd_loss', 'update_loss']
+    total_loss_dict = {l:0 for l in loss_types}
+    total_num_events = 0
     for batch in tqdm(data_loader):        
         batch = batch.to(device)
         if update_params:
             optimizer.zero_grad()
-
-        y_pred, update_loss = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
-                                       ns_samples=ns_samples, neg_sampler=neg_sampler, split_mode=split_mode,
-                                       num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling)
+        
+        y_link_pred, y_amt_pred, update_loss = _get_y_pred_for_batch(
+            batch, model, neighbor_loader, data, device, ns_samples=ns_samples, neg_sampler=neg_sampler, 
+            split_mode=split_mode, num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling,
+            predict_amount='amount_pred' in model)
+        assert y_link_pred.size(1) == (3*ns_samples)+1
+        
+        if loss_name == 'ce-softmax':
+            criterion = torch.nn.CrossEntropyLoss()  # softmax then cross entropy
+            target = torch.zeros(y_link_pred.size(0), device=device).long()  # positive always in first position
+            link_loss = criterion(y_link_pred, target)
+        else:
+            criterion = torch.nn.BCEWithLogitsLoss()  # original loss from TGB: sigmoid then binary cross entropy
+            pos_out = y_link_pred[:, :1]
+            neg_out = y_link_pred[:, 1:]            
+            link_loss = criterion(pos_out, torch.ones_like(pos_out))
+            link_loss += criterion(neg_out, torch.zeros_like(neg_out))
+        
+        if 'amount_pred' in model:  # will be in model if args.skip_amount = False
+            criterion = torch.nn.MSELoss()
+            target = batch.msg[:, :1]  # amount is always first feature in msg
+            amt_loss = amt_loss_weight * torch.sqrt(criterion(y_amt_pred, target))  # RMSE  
+        else:
+            amt_loss = 0
+        
         if 'inventory' in model:  # will be in model if args.use_inventory = True
-            inv_loss, debt_loss, consump_rwd_loss = _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
-                                                      num_firms=num_firms, num_products=num_products)
+            inv_loss, debt_loss, consump_rwd_loss = _update_inventory_and_compute_loss(
+                batch, model, neighbor_loader, data, device, num_firms=num_firms, num_products=num_products)
         else:
             inv_loss, debt_loss, consump_rwd_loss = 0, 0, 0
-      
-        if loss_name == 'ce-softmax':
-            target = torch.zeros(y_pred.size(0), device=device).long()  # positive always in first position
-            logits_loss = criterion(y_pred, target)
-        else:
-            # original binary loss from TGB
-            assert y_pred.size(1) == (3*ns_samples)+1
-            pos_out = y_pred[:, :1]
-            neg_out = y_pred[:, 1:]            
-            logits_loss = criterion(pos_out, torch.ones_like(pos_out))
-            logits_loss += criterion(neg_out, torch.zeros_like(neg_out))
         
-        # three losses: logits loss from link prediction, inventory loss, and memory update loss
-        loss = logits_loss + inv_loss + update_loss
-        total_loss += float(loss) * batch.num_events  # scale by batch size
-        total_logits_loss += float(logits_loss) * batch.num_events
-        total_inv_loss += float(inv_loss) * batch.num_events
-        total_debt_loss += float(debt_loss) * batch.num_events
-        total_consump_rwd_loss += float(consump_rwd_loss) * batch.num_events
-        total_update_loss += float(update_loss) * batch.num_events
+        loss = link_loss + amt_loss + inv_loss + update_loss
+        total_loss_dict['loss'] += float(loss) * batch.num_events  # scale by batch size
+        total_loss_dict['link_loss'] += float(link_loss) * batch.num_events
+        total_loss_dict['amt_loss'] += float(amt_loss) * batch.num_events
+        total_loss_dict['inv_loss'] += float(inv_loss) * batch.num_events
+        total_loss_dict['debt_loss'] += float(debt_loss) * batch.num_events
+        total_loss_dict['consump_rwd_loss'] += float(consump_rwd_loss) * batch.num_events
+        total_loss_dict['update_loss'] += float(update_loss) * batch.num_events
         total_num_events += batch.num_events
         
         # Update memory and neighbor loader with ground-truth transactions
@@ -271,8 +286,11 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             model['memory'].detach()
             if 'inventory' in model:
                 model['inventory'].detach()
+    
+    for l, total in total_loss_dict.items():
+        total_loss_dict[l] = total / total_num_events
+    return total_loss_dict
 
-    return total_loss / total_num_events, total_logits_loss / total_num_events, total_inv_loss / total_num_events, total_debt_loss / total_num_events, total_consump_rwd_loss / total_num_events, total_update_loss / total_num_events
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
@@ -300,35 +318,39 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     """
     assert split_mode in ['val', 'test']
     assert metric in ['mrr', 'hits@']
-        
-    model['memory'].eval()
-    model['gnn'].eval()
-    model['link_pred'].eval()
+    for module in model.values():
+        module.eval()
 
-    perf_list = []
-    batch_size = []
-    
+    total_perf_dict = {'link_pred':0, 'amount_pred':0}
+    total_num_events = 0
     for batch in tqdm(data_loader):
-        y_pred, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_link_pred, y_amt_pred, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products,
-                                       use_prev_sampling = use_prev_sampling)
+                                       use_prev_sampling=use_prev_sampling, 
+                                       predict_amount='amount_pred' in model)
         input_dict = {
-            "y_pred_pos": y_pred[:, :1],
-            "y_pred_neg": y_pred[:, 1:],
+            "y_pred_pos": y_link_pred[:, :1],
+            "y_pred_neg": y_link_pred[:, 1:],
             "eval_metric": [metric]
         }
-        perf_list.append(evaluator.eval(input_dict)[metric])
-        batch_size.append(y_pred.size(0))
+        link_perf = evaluator.eval(input_dict)[metric]  # link prediction performance
+        total_perf_dict['link_pred'] += link_perf * batch.num_events
+        
+        if 'amount_pred' in model:  # amount prediction perforamance
+            criterion = torch.nn.MSELoss()
+            target = batch.msg[:, :1]  # amount is always first feature in msg
+            rmse = torch.sqrt(criterion(y_amt_pred, target))  # RMSE
+            total_perf_dict['amount_pred'] += float(rmse) * batch.num_events
+        total_num_events += batch.num_events
 
         # Update memory and neighbor loader with ground-truth state.
         model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
         neighbor_loader.insert(batch.src, batch.dst, batch.prod)
     
-    num = (torch.tensor(perf_list) * torch.tensor(batch_size)).sum()
-    denom = torch.tensor(batch_size).sum()
-    perf_metrics = float(num/denom)
-    return perf_metrics
+    for p, total in total_perf_dict.items():
+        total_perf_dict[p] = total / total_num_events
+    return total_perf_dict
 
 
 # ===========================================
@@ -352,37 +374,40 @@ def get_tgnpl_args():
     """
     parser = argparse.ArgumentParser('*** TGB ***')
     parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
+    # model parameters
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
     parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
-    parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
-    parser.add_argument('--bs', type=int, help='Batch size', default=200)
+    parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=1000)
+    parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=1000)
+    parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
+    parser.add_argument('--num_neighbors', type=int, help='Number of neighbors to store in NeighborLoader', default=10)
+    parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
+    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for inventory loss; only used with use_inventory', default=10)
+    parser.add_argument('--consump_rwd', type=float, help='Consumption reward weight for inventory loss; only used with use_inventory', default=1)
+    parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
+    parser.add_argument('--weights', type=str, help='Saved weights to initialize model with')
+    parser.add_argument('--skip_amount', action="store_true", help='If true, skip amount prediction')
+    # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
     parser.add_argument('--seed', type=int, help='Random seed', default=1)
-    parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=100)
-    parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
-    parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=100)
-    parser.add_argument('--num_neighbors', type=int, help='Number of neighbors to store in NeighborLoader', default=10)
+    parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
+    parser.add_argument('--bs', type=int, help='Batch size', default=200)
     parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
-    parser.add_argument('--wandb', type=bool, help='Wandb support', default=False)
-    parser.add_argument('--tensorboard', type=bool, help='Tensorboard support', default=False)
-    parser.add_argument('--use_inventory', type=bool, help='Whether to use inventory module', default=False)
-    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for inventory loss', default=10)
-    parser.add_argument('--consum_rwd', type=float, help='Consumption reward weight for inventory loss', default=1)
-    parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
-    parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--weights', type=str, default='', help='Saved weights to initialize model with')
-    parser.add_argument('--num_train_days', type=int, default=-1, help='How many days to use for training; used for debugging and faster training')
-    parser.add_argument('--train_on_val', type=bool, default=False, help='If true, train on validation set with fixed negative sampled; used for debugging')
-    parser.add_argument('--train_with_fixed_samples', default=False, action="store_true", help='If true, use fixed negative samples for training')
-    parser.add_argument('--test_per_epoch', default=False, action="store_true", help='If true, evaluate MRR on test every epoch')
-    parser.add_argument('--use_prev_sampling', action='store_true', help = "if true, use previous hypergraph sampling method")
+    parser.add_argument('--num_train_days', type=int, help='How many days to use for training; used for debugging and faster training', default=-1)
+    parser.add_argument('--train_on_val', action='store_true', help='Train on validation set with fixed negative sampled; used for debugging')
+    parser.add_argument('--train_with_fixed_samples', action="store_true", help='Use fixed negative samples for training')
+    parser.add_argument('--test_per_epoch', action="store_true", help='Evaluate MRR on test every epoch; used for debugging')
+    parser.add_argument('--use_prev_sampling', action='store_true', help = "Use previous negative sampling method")
+    # system parameters
+    parser.add_argument('--wandb', action='store_true', help='Wandb support')
+    parser.add_argument('--tensorboard', action='store_true', help='Tensorboard support')
+    parser.add_argument('--gpu', type=int, help='Which GPU to use', default=0)
     
     try:
         args = parser.parse_args()
         defaults = parser.parse_args([])
-    
     except:
         parser.print_help()
         sys.exit(0)
@@ -466,15 +491,20 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         assert args.emb_name == 'id'
         gnn = IdentityEmbedding().to(device)
 
-    # initialize decoder
-    link_emb = args.mem_dim if args.emb_name == 'id' else args.emb_dim
-    link_pred = LinkPredictorTGNPL(in_channels=link_emb).to(device)
-
+    # initialize link predictor
+    emb_dim = args.mem_dim if args.emb_name == 'id' else args.emb_dim
+    link_pred = DecoderTGNPL(in_channels=emb_dim).to(device)
+    
     # put together in model and initialize optimizer
     model = {'memory': memory,
              'gnn': gnn,
              'link_pred': link_pred}
     all_params = set(model['memory'].parameters()) | set(model['gnn'].parameters()) | set(model['link_pred'].parameters())
+    
+    # add amount predictor if required
+    if not args.skip_amount:
+        amt_pred = DecoderTGNPL(in_channels=emb_dim).to(device)  # can use the same architecture
+        model['amount_pred'] = amt_pred
     
     # add inventory module if required
     if args.use_inventory:
@@ -482,7 +512,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
             num_firms = num_firms,
             num_prods = num_products,
             debt_penalty = args.debt_penalty,
-            consumption_reward = args.consum_rwd,
+            consumption_reward = args.consump_rwd,
             device = device,
             emb_dim = link_emb,
         ).to(device)
@@ -498,14 +528,15 @@ def set_up_data(args, data, dataset):
     Normalize edge features; split data into train, val, test.
     """
     # apply log scaling and standard scaling to edge features
-    msg = data.msg
-    min_val = torch.min(msg[msg > 0])
-    msg = torch.clip(msg, min_val, None)  # so that we don't take log of 0
-    assert (msg > 0).all()
-    log_msg = torch.log(msg)  # log scale
-    mean = torch.mean(log_msg)
-    std = torch.std(log_msg)
-    data.msg = (log_msg - mean) / std  # standard scaling
+    for d in range(data.msg.shape[1]):
+        vals = data.msg[:, d]
+        min_val = torch.min(vals[vals > 0])  # minimum value greater than 0
+        vals = torch.clip(vals, min_val, None)  # clip so we don't take log of 0
+        vals = torch.log(vals)  # log scale
+        mean = torch.mean(vals)
+        std = torch.std(vals)
+        vals = (vals - mean) / std  # standard scaling
+        data.msg[:, d] = vals
     
     if args.num_train_days == -1:
         train_data = data[dataset.train_mask]
@@ -589,7 +620,8 @@ def run_experiment(args):
     evaluator = Evaluator(name=args.dataset)
     data = dataset.get_TemporalData().to(device)
     train_loader, val_loader, test_loader = set_up_data(args, data, dataset)
-    print('Converted amount to log-scale and applied standard scaling: mean = %.2f' % torch.mean(data.msg))
+    edge_feat_means = torch.mean(data.msg, axis=0)  # check that standard scaling worked
+    assert torch.isclose(edge_feat_means, torch.zeros_like(edge_feat_means).to(device), atol=1e-5).all(), edge_feat_means
     if args.train_on_val:
         print('Warning: ignoring train set, training on validation set and its fixed negative samples')
     if args.train_with_fixed_samples:
@@ -597,7 +629,7 @@ def run_experiment(args):
     
     # Initialize model
     model, opt = set_up_model(args, data, device)
-    if args.weights != "":
+    if args.weights is not None:
         print('Initializing model with weights from', args.weights)
         model_path = os.path.join(save_model_dir, args.weights)
         assert os.path.isfile(model_path)
@@ -635,93 +667,83 @@ def run_experiment(args):
 
         # ==================================================== Train & Validation
         train_loss_list = []
-        val_perf_list = []
-        test_perf_list = []
+        val_link_perf_list = []
+        val_amt_perf_list = []
+        test_link_perf_list = []
+        test_amt_perf_list = []
+        
         start_train_val = timeit.default_timer()
         for epoch in range(1, args.num_epoch + 1):
             start_epoch_train = timeit.default_timer()
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
                 dataset.load_val_ns()  # load val negative samples
-                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(
-                    model, opt, neighbor_loader, data, val_loader, device, 
+                loss_dict = train(model, opt, neighbor_loader, data, val_loader, device, 
                     neg_sampler=neg_sampler, split_mode="val", use_prev_sampling=args.use_prev_sampling)
                 model['memory'].reset_state()  # reset memory and graph for beginning of val
                 neighbor_loader.reset_state()
             elif args.train_with_fixed_samples:
                 # train on fixed negative samples instead of randomly drawn per epoch
                 dataset.load_train_ns()  # load train negative samples
-                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(
-                    model, opt, neighbor_loader, data, train_loader, device, 
+                loss_dict = train(model, opt, neighbor_loader, data, train_loader, device, 
                     neg_sampler=neg_sampler, split_mode="train", use_prev_sampling=args.use_prev_sampling)
                 # Don't reset memory and graph since val is a continuation of train
             else:
-                loss, logits_loss, inv_loss, debt_loss, consump_rwd_loss, update_loss = train(
-                    model, opt, neighbor_loader, data, train_loader, device)
+                loss_dict = train(model, opt, neighbor_loader, data, train_loader, device)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
-            print(
-                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Logits_Loss: {logits_loss:.4f}, Inv_Loss: {inv_loss:.4f}, Debt_Loss: {debt_loss:.4f}, Consumption_Reward_Loss: {consump_rwd_loss:.4f}, Update_Loss: {update_loss:.4f}, Training elapsed Time (s): {time_train: .4f}"
-            )
-            train_loss_list.append(float(loss))
+            loss_str = ', '.join([f'{s}: {l:.4f}' for s,l in loss_dict.items()])
+            print(f'Epoch: {epoch:02d}, {loss_str}; Training elapsed Time (s): {time_train:.4f}')
+            train_loss_list.append(loss_dict['loss'])
 
             # validation
             start_val = timeit.default_timer()
             dataset.load_val_ns()  # load val negative samples
-            perf_metric_val = test(model, neighbor_loader, data, val_loader, neg_sampler, evaluator,
-                                   device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling)
+            val_dict = test(model, neighbor_loader, data, val_loader, neg_sampler, evaluator,
+                                  device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling)
             time_val = timeit.default_timer() - start_val
-            print(f"\tValidation {metric}: {perf_metric_val: .4f}")
+            print(f"\tValidation {metric}: {val_dict['link_pred']:.4f}, RMSE: {val_dict['amount_pred']:.4f}")
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
-            val_perf_list.append(perf_metric_val)
+            val_link_perf_list.append(val_dict['link_pred'])
+            val_amt_perf_list.append(val_dict['amount_pred'])
             
-            # test
-            if args.test_per_epoch:
+            # log metrics to tensorboard and wandb
+            log_dict = loss_dict.copy()
+            log_dict[f'val_link_pred_{metric}'] = val_dict['link_pred']
+            log_dict['val_amount_pred_RMSE'] = val_dict['amount_pred']
+            log_dict['elapsed_time_train'] = time_train
+            log_dict['elapsed_time_val'] = time_val
+            if args.tensorboard:
+                for k, v in log_dict:
+                    writer.add_scalar(k, v, epoch)            
+            if args.wandb:
+                wandb.log(log_dict)
+                
+            if args.test_per_epoch:  # evaluate on test per epoch - used for debugging
                 start_test = timeit.default_timer()
                 dataset.load_test_ns()  # load test negative samples
-                perf_metric_test = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
+                test_dict = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
                                        device, split_mode="test", metric=metric, use_prev_sampling=args.use_prev_sampling)
                 time_test = timeit.default_timer() - start_test
-                print(f"\tTest {metric}: {perf_metric_test: .4f}")
+                print(f"\tTest {metric}: {test_dict['link_pred']:.4f}, RMSE: {test_dict['amount_pred']:.4f}")
                 print(f"\tTest: Elapsed time (s): {time_test: .4f}")
-                test_perf_list.append(perf_metric_test)
-
-            # log metrics to tensorboard
-            if args.tensorboard:
-                writer.add_scalar("loss", loss, epoch)
-                writer.add_scalar("logits_loss", logits_loss, epoch)
-                writer.add_scalar("inv_loss", inv_loss, epoch)
-                writer.add_scalar("debt_loss", debt_loss, epoch)
-                writer.add_scalar("consump_rwd_loss", consump_rwd_loss, epoch)
-                writer.add_scalar("update_loss", update_loss, epoch)
-                writer.add_scalar("perf_metric_val", perf_metric_val, epoch)
-                writer.add_scalar("elapsed_time_train", time_train, epoch)
-                writer.add_scalar("elapsed_time_val", time_val, epoch)
+                test_link_perf_list.append(test_dict['link_pred'])
+                test_amt_perf_list.append(test_dict['amount_pred'])
             
-            # log metric to wandb
-            if args.wandb:
-                wandb.log({"loss": loss, 
-                           "logits_loss": logits_loss,
-                           "inv_loss": inv_loss,
-                           "debt_loss": debt_loss,
-                           "consump_rwd_loss": consump_rwd_loss,
-                           "update_loss": update_loss,
-                           "perf_metric_val": perf_metric_val, 
-                           "elapsed_time_train": time_train, 
-                           "elapsed_time_val": time_val
-                           })
-            # save train+val results after each epoch
+            # save results after each epoch
             save_results({'model': MODEL_NAME,
                   'data': args.dataset,
                   'run': run_idx,
                   'seed': args.seed,
                   'train loss': train_loss_list,
-                  f'val {metric}': val_perf_list,
-                  f'test {metric}': test_perf_list}, 
+                  f'val {metric}': val_link_perf_list,
+                  f'val RMSE': val_amt_perf_list,
+                  f'test {metric}': test_link_perf_list,
+                  f'test RMSE': test_amt_perf_list}, 
                   results_filename, replace_file=True)
 
             # check if best on val so far, save if so, stop if no improvement observed for a while
-            if early_stopper.step_check(perf_metric_val, model):
+            if early_stopper.step_check(val_dict['link_pred'], model):
                 break
                 
         # also save final model
@@ -738,17 +760,29 @@ def run_experiment(args):
         # ==================================================== Test
         if args.test_per_epoch:
             # we already ran test every epoch, just get test metric from best val
-            perf_metric_test = test_perf_list[np.argmax(val_perf_list)]
+            best_epoch = np.argmax(val_link_perf_list)
+            test_dict = {'link_pred': test_link_perf_list[best_epoch],
+                         'amount_pred': test_amt_perf_list[best_epoch]}
         else:
             early_stopper.load_checkpoint(model)  # load the best model
             dataset.load_test_ns()  # load test negatives
             start_test = timeit.default_timer()
-            perf_metric_test = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
+            test_dict = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
                                     device, split_mode="test", metric=metric, 
                                     use_prev_sampling=args.use_prev_sampling)
+            save_results({'model': MODEL_NAME,
+                  'data': args.dataset,
+                  'run': run_idx,
+                  'seed': args.seed,
+                  'train loss': train_loss_list,
+                  f'val {metric}': val_link_perf_list,
+                  'val RMSE': val_amt_perf_list,
+                  f'test {metric}': test_dict['link_pred'],
+                  'test RMSE': test_dict['amount_pred']}, 
+                  results_filename, replace_file=True)
 
         print(f"INFO: Test: Evaluation Setting: >>> ONE-VS-MANY <<< ")
-        print(f"\tTest: {metric}: {perf_metric_test: .4f}")
+        print(f"\tTest {metric}: {test_dict['link_pred']:.4f}, RMSE: {test_dict['amount_pred']:.4f}")
         test_time = timeit.default_timer() - start_test
         print(f"\tTest: Elapsed Time (s): {test_time: .4f}")
         if args.tensorboard:
@@ -757,29 +791,18 @@ def run_experiment(args):
                                 "model_name": MODEL_NAME, 
                                 "metric": metric})
             metric_dict = {
-                "best_epoch": early_stopper.best_epoch,
-                "perf_metric_test": perf_metric_test
+                'best_epoch': early_stopper.best_epoch,
+                f'test {metric}': test_dict['link_pred'],
+                'test RMSE': test_dict['amount_pred']
             }
             writer.add_hparams(hparam_dict, metric_dict)
             writer.add_scalar("elapsed_time_test", test_time)
-            
         if args.wandb:
             wandb.summary["metric"] = metric
             wandb.summary["best_epoch"] = early_stopper.best_epoch
-            wandb.summary["perf_metric_test"] = perf_metric_test
+            wandb.summary[f'test {metric}'] = test_dict['link_pred']
+            wandb.summary['test RMSE'] = test_dict['amount_pred']
             wandb.summary["elapsed_time_test"] = test_time
-
-        save_results({'model': MODEL_NAME,
-                      'data': args.dataset,
-                      'run': run_idx,
-                      'seed': args.seed,
-                      'train loss': train_loss_list,
-                      f'val {metric}': val_perf_list,
-                      f'test {metric}': test_perf_list if args.test_per_epoch else perf_metric_test,
-                      'test_time': test_time,
-                      'tot_train_val_time': train_val_time
-                      }, 
-            results_filename, replace_file=True)
 
         print(f"INFO: >>>>> Run: {run_idx}, elapsed time: {timeit.default_timer() - start_run: .4f} <<<<<")
         print('-------------------------------------------------------------------------------')
