@@ -8,10 +8,10 @@ import torch.nn.init as init
 from torch.nn import Linear
 import torch.nn.functional as F
 
-
-class LinkPredictorTGNPL(torch.nn.Module):
+class DecoderTGNPL(torch.nn.Module):
     """
-    Link predictor for TGN-PL. Compared to TGN decoder (below):
+    Decoder for TGN-PL, used for link prediction and amount prediction.
+    Compared to TGN decoder (below):
     - we have three input embeddings instead of two, because of hyperedge,
     - we concatenate then pass through lin_hidden,
     - we remove the final sigmoid since our loss, softmax cross-entropy,
