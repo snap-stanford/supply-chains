@@ -69,18 +69,15 @@ class GraphMixer(nn.Module):
         self.neighbor_sampler = neighbor_loader
 
         # Tensor, shape (batch_size, node_feat_dim)
-        src_node_embeddings = self.compute_node_temporal_embeddings(node_ids=src_node_ids, node_interact_times=node_interact_times,
-                                                                    time_gap=self.time_gap)
+        src_node_embeddings = self.compute_node_temporal_embeddings(node_ids=src_node_ids, node_interact_times=node_interact_times)
         # Tensor, shape (batch_size, node_feat_dim)
-        dst_node_embeddings = self.compute_node_temporal_embeddings(node_ids=dst_node_ids, node_interact_times=node_interact_times,
-                                                                    time_gap=self.time_gap)
+        dst_node_embeddings = self.compute_node_temporal_embeddings(node_ids=dst_node_ids, node_interact_times=node_interact_times)
         # Tensor, shape (batch_size, node_feat_dim)
-        prod_node_embeddings = self.compute_node_temporal_embeddings(node_ids=prod_node_ids, node_interact_times=node_interact_times,
-                                                                    time_gap=self.time_gap)
+        prod_node_embeddings = self.compute_node_temporal_embeddings(node_ids=prod_node_ids, node_interact_times=node_interact_times)
 
         return src_node_embeddings, dst_node_embeddings, prod_node_embeddings
 
-    def compute_node_temporal_embeddings(self, node_ids: torch.Tensor, node_interact_times: torch.Tensor, time_gap: int = 2000):
+    def compute_node_temporal_embeddings(self, node_ids: torch.Tensor, node_interact_times: torch.Tensor):
         """
         given node ids node_ids, and the corresponding time node_interact_times, return the temporal embeddings of nodes in node_ids
         :param node_ids: tensor, shape (batch_size, ), node ids
@@ -129,7 +126,7 @@ class GraphMixer(nn.Module):
         # time_gap_neighbor_node_ids, ndarray, shape (batch_size, time_gap)
         # time_gap_neighbor_node_ids, _, _ = self.neighbor_sampler.get_historical_neighbors(node_ids=node_ids,
         #                                                                                node_interact_times=node_interact_times,
-        #                                                                                num_neighbors=time_gap)
+        #                                                                                num_neighbors=self.time_gap)
         time_gap_neighbor_node_ids = neighbor_node_ids # TODO: simplified version now, assuming args.time_gap == args.num_neighbors
 
         # Tensor, shape (batch_size, time_gap, node_feat_dim)
