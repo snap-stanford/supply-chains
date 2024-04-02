@@ -108,33 +108,34 @@ class LastNeighborLoaderTime:
         a. we only return neighbors instead of a set of both neighbors and nodes
         b. we maintain the same info storage approach in insert(), contrary to the storage approach in TGBBaseline
     '''
-    def __init__(self, num_nodes: int, size: int, edge_feat_dim: int, device=None):
-        self.size = size # num_neighbors
+    def __init__(self, num_nodes: int, num_neighbors: int, time_gap: int, edge_feat_dim: int, device=None):
+        self.size = max(num_neighbors, time_gap) # maximum number of neighbors
 
-        self.neighbors = torch.empty((num_nodes, size), dtype=torch.long, device=device)
-        self.e_id = torch.empty((num_nodes, size), dtype=torch.long, device=device)
-        self.t_id = torch.empty((num_nodes, size), dtype=torch.long, device=device)
-        self.msg = torch.empty((num_nodes, size, edge_feat_dim), dtype=torch.float, device=device)
+        self.neighbors = torch.empty((num_nodes, self.size), dtype=torch.long, device=device)
+        self.e_id = torch.empty((num_nodes, self.size), dtype=torch.long, device=device)
+        self.t_id = torch.empty((num_nodes, self.size), dtype=torch.long, device=device)
+        self.msg = torch.empty((num_nodes, self.size, edge_feat_dim), dtype=torch.float, device=device)
         self._assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
         self.edge_feat_dim = edge_feat_dim
 
         self.reset_state()
 
-    def __call__(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def __call__(self, n_id: Tensor, size: int = 10) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         '''
         Inputs
         :param n_id: tensor, shape (batch_size, )
+        :param size: int, number of neighbors to return for each node, since sometimes we don't load all neighbors stored
         Returns
         :param neighbors: tensor, shape (batch_size, size)
         :param e_id: tensor, shape (batch_size, size)
         :param t_id: tensor, shape (batch_size, size)
         :param msg: tensor, shape (batch_size, size, self.edge_feat_dim)
         '''
-        neighbors = self.neighbors[n_id]
-        nodes = n_id.view(-1, 1).repeat(1, self.size)
-        e_id = self.e_id[n_id]
-        t_id = self.t_id[n_id]
-        msg = self.msg[n_id]
+        assert size <= self.size, "Error: neighbor loader __call__ size should be <= maximum num neighbors stored"
+        neighbors = self.neighbors[n_id][:, :size]
+        e_id = self.e_id[n_id][:, :size]
+        t_id = self.t_id[n_id][:, :size]
+        msg = self.msg[n_id][:, :size, :]
 
         # Filter invalid neighbors (identified by `e_id < 0`).
         mask = e_id < 0
@@ -144,6 +145,7 @@ class LastNeighborLoaderTime:
         msg[mask] = EMPTY_VALUE
 
         # Relabel node indices. # NOT NEEDED IN THIS VERSION
+        # nodes = n_id.view(-1, 1).repeat(1, self.size)
         # n_id = torch.cat([n_id.unique(), neighbors.unique()]).unique()
         # self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
         # neighbors, nodes = self._assoc[neighbors], self._assoc[nodes]
@@ -219,14 +221,14 @@ class LastNeighborLoaderTime:
         
 
 class LastNeighborLoaderGraphmixer(LastNeighborLoaderTime):
-    def __init__(self, num_nodes: int, size: int, edge_feat_dim: int, device=None):
-        super().__init__(num_nodes, size, edge_feat_dim, device) 
+    def __init__(self, num_nodes: int, num_neighbors: int, time_gap: int, edge_feat_dim: int, device=None):
+        super().__init__(num_nodes, num_neighbors, time_gap, edge_feat_dim, device) 
 
     # def __call__(self, f_id: Tensor, p_id: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         # n_id = torch.cat([f_id, p_id])
         # return super().__call__(n_id)
-    def __call__(self, n_id: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        return super().__call__(n_id)
+    def __call__(self, n_id: Tensor, size: int) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        return super().__call__(n_id, size)
 
     def insert(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, msg: Tensor):
         for i in range(src.size()[0]):  

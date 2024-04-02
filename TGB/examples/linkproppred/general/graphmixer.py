@@ -170,27 +170,28 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     
 def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                        num_firms=None, num_products=None):
-    """
-    Update inventory per firm based on latest batch and compute losses.
-    """
-    # use global variables when arguments are not specified
-    if num_firms is None:
-        num_firms = NUM_FIRMS
-    if num_products is None:
-        num_products = NUM_PRODUCTS
-    num_nodes = num_firms + num_products
-    # Helper vector to map global node indices to local ones
-    assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
+#     """
+#     Update inventory per firm based on latest batch and compute losses.
+#     """
+#     # use global variables when arguments are not specified
+#     if num_firms is None:
+#         num_firms = NUM_FIRMS
+#     if num_products is None:
+#         num_products = NUM_PRODUCTS
+#     num_nodes = num_firms + num_products
+#     # Helper vector to map global node indices to local ones
+#     assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
     
-    prod, t = batch.prod.flatten(), batch.t.flatten()
-    # TODO: think about how to .unique() since we can have different timestamps in the same batch for a fixed node
+#     prod, t = batch.prod.flatten(), batch.t.flatten()
+#     # TODO: think about how to .unique() since we can have different timestamps in the same batch for a fixed node
     
-    # Only compute product node embedding to save time
-    model['graphmixer'].neighbor_sampler = neighbor_loader
-    prod_embs = model['graphmixer'].compute_node_temporal_embeddings(node_ids=prod, node_interact_times=t)
+#     # Only compute product node embedding to save time
+#     model['graphmixer'].neighbor_sampler = neighbor_loader
+#     prod_embs = model['graphmixer'].compute_node_temporal_embeddings(node_ids=prod, node_interact_times=t)
    
-    # prod_embs has shape (num_products, num_products)
-    inv_loss, debt_loss, consump_rwd_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
+#     # prod_embs has shape (num_products, num_products)
+#     inv_loss, debt_loss, consump_rwd_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
+    inv_loss, debt_loss, consump_rwd_loss = 0, 0, 0
     return inv_loss, debt_loss, consump_rwd_loss
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
@@ -602,7 +603,7 @@ def run_experiment(args):
             raise Exception('Failed to initialize model with weights')
             
     # Initialize neighbor loader
-    neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, size=args.num_neighbors, edge_feat_dim=data.msg.shape[1], device=device)
+    neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, num_neighbors=args.num_neighbors, time_gap=args.time_gap, edge_feat_dim=data.msg.shape[1], device=device)
 
     print("==========================================================")
     print(f"=================*** {MODEL_NAME}: LinkPropPred: {args.dataset} ***=============")
