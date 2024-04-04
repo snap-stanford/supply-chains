@@ -395,6 +395,8 @@ def get_graphmixer_args():
     parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
     parser.add_argument('--num_neighbors', type=int, default=10, help='number of neighbors')
     parser.add_argument('--time_gap', type=int, default=2000, help='time gap')
+    parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
+    parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
 
     try:
         args = parser.parse_args()
@@ -454,7 +456,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None, mimic_st
     node_raw_features = torch.eye(num_nodes).to(device) # since node features is None here, one_hot encoding of node id
     edge_feat_dim = data.msg.shape[1]
     graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
-                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, mimic_static_debug=mimic_static_debug).to(device) # TODO: delete debug flag
+                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, token_dim_expansion_factor=args.token_dim_expansion_factor, channel_dim_expansion_factor=args.channel_dim_expansion_factor, mimic_static_debug=mimic_static_debug).to(device) # TODO: delete debug flag
 
     # initialize 
 #     link_pred = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1], input_dim3=node_raw_features.shape[1], hidden_dim=node_raw_features.shape[1], output_dim=1).to(device)
