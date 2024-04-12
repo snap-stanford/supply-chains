@@ -11,7 +11,7 @@ class EarlyStopMonitor(object):
     
     def __init__(self, save_model_dir: str, save_model_id: str, 
                 tolerance: float=1e-10, patience: int=5,
-                higher_better: bool=True):
+                higher_better: bool=True, ignore_patience_num_epoch: int=50):
         r"""
         Early Stopping Monitor
         :param: save_model_path: strc, where to save the model
@@ -19,15 +19,17 @@ class EarlyStopMonitor(object):
         :param: tolerance: float, the amount of tolerance of the early stopper
         :param: patience: int, how many round to wait
         :param: higher_better: whether higher_value of the a metric is better
+        :param: ignore_patience_num_epoch: how many epochs we run before considering patience
         """
         self.tolerance = tolerance
         self.patience = patience
         self.higher_better = higher_better
+        self.ignore_patience_num_epoch = ignore_patience_num_epoch
         self.counter = 0
         self.best_sofar = None
         self.best_epoch = 0
         self.epoch_idx = 1
-
+        
         self.save_model_dir = save_model_dir
         if not os.path.exists(self.save_model_dir):
             os.mkdir(self.save_model_dir)
@@ -59,7 +61,9 @@ class EarlyStopMonitor(object):
             self.best_epoch = self.epoch_idx
         else:
             # no improvement observed
-            self.counter += 1
+            # and the epoch surpass number of epochs to ignore 
+            if self.ignore_patience_num_epoch < self.epoch_idx:
+                self.counter += 1
         
         self.epoch_idx += 1
         

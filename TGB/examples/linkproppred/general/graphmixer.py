@@ -397,6 +397,9 @@ def get_graphmixer_args():
     parser.add_argument('--time_gap', type=int, default=2000, help='time gap')
     parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
     parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
+    
+    # Additional early stopper argument, not in TGNPL yet
+    parser.add_argument('--ignore_patience_num_epoch', type=int, default=50, help='how many epochs we run before considering patience')
 
     try:
         args = parser.parse_args()
@@ -620,7 +623,7 @@ def run_experiment(args):
         # define an early stopper
         save_model_id = f'{exp_id}_{run_idx}'
         early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
-                                         tolerance=args.tolerance, patience=args.patience)
+                                         tolerance=args.tolerance, patience=args.patience, ignore_patience_num_epoch=args.ignore_patience_num_epoch)
 
         # ==================================================== Train & Validation
         dataset.load_val_ns()  # load validation negative samples
