@@ -15,6 +15,7 @@ import json
 from tqdm import tqdm
 import os
 import multiprocessing as mp
+from collections import Counter
 
 def get_args():
     #make these into argparse
@@ -83,79 +84,38 @@ def partition_edges(df, train_max_ts, val_max_ts, test_max_ts, use_prev_sampling
 def count_node_matches(edge1, edge2):
     return sum([edge1[j] == edge2[j] for j in range(len(edge1))])
 
-def sample_from_list_of_triplets(l, k):
+def sample_from_list_of_triplets(l, k, p_vals=None):
     """
     Can't directly call np.random.choice on list since that function only works with 1d arrays.
     """
     if len(l) == 0:
         return []
     size = min(k, len(l))
-    idxs = np.random.choice(len(l), size=size, replace=False)
+    idxs = np.random.choice(len(l), size=size, replace=False, p=p_vals)
     return [l[i] for i in idxs]
 
-""" simpler version 
-def edge_sampler_wrapper(split):
-    global edge_sampler 
-
-    E_eval = None
-    if (split == "train"):
-        E_eval = E_train.copy()
-    elif (split == "val"):
-        E_eval = E_val.copy()
-    else:
-        E_eval = E_test.copy()
-
-    def edge_sampler(key):
-        pos_s, pos_d, pos_p, ts = key
-        ts_eval_edges = [(source, destination, product) for source, destination, product in E_eval[ts]]
-        ts_eval_edges_set = set(ts_eval_edges)
-
-        hist, loose_hist = [], []
-        for hyperedge in E_train_edges:
-            if hyperedge in ts_eval_edges_set:
-                continue 
-            num_node_matches = count_node_matches((pos_s, pos_d, pos_p), hyperedge)
-            if (num_node_matches == 2): #hist negative
-                hist.append(hyperedge)
-            elif (num_node_matches == 1): #loose hist negative 
-                loose_hist.append(hyperedge)
-
-        #sample historical negatives -- aim to get num_samples // 2 in total
-        hist_sampled_idx = np.random.choice(range(len(hist)), size = min(num_samples // 2, len(hist)), replace = False)
-        hist_sampled = [hist[j] for j in hist_sampled_idx]
-
-        #use loose negatives if not enough historical negatives
-        if (len(hist_sampled) < num_samples // 2):
-            loose_hist_sampled_idx = np.random.choice(range(len(loose_hist)),
-                                    size = min(num_samples // 2 - len(hist_sampled), len(loose_hist)), replace = False)
-            loose_hist_sampled = [loose_hist[j] for j in loose_hist_sampled_idx]
-            hist_sampled += loose_hist_sampled 
+def convert_triplet_to_index(src, dst, prod):
+    """
+    Convert (source, destination, product) triplet to single index.
+    """
+    prod = prod - NUM_FIRMS
+    assert (src >= 0) and (src < NUM_FIRMS)
+    assert (dst >= 0) and (dst < NUM_FIRMS)
+    assert (prod >= 0) and (prod < NUM_PRODS)
+    idx = src * (NUM_FIRMS * NUM_PRODS)
+    idx += dst * NUM_PRODS
+    idx += prod
+    return idx
     
-        # sample random negatives 
-        hist_deficit = num_samples // 2 - len(hist_sampled)
-        random_surplus = [0,0,0]
-        for _ in range(hist_deficit):
-            random_surplus[int(3 * np.random.rand())] += 1
-    
-        #ensure the random negatives aren't historical 
-        rand_s = [s for s in L_firm if (s, pos_d, pos_p) not in ts_eval_edges_set and (s, pos_d, pos_p) not in E_train_edges]
-        rand_d = [d for d in L_firm if (pos_s, d, pos_p) not in ts_eval_edges_set and (pos_s, d, pos_p) not in E_train_edges]
-        rand_p = [p for p in L_products if (pos_s, pos_d, p) not in ts_eval_edges_set and (pos_s, pos_d, p) not in E_train_edges]
-    
-        #sample num_samples // 6 of each perturbation class, plus extras if there is a deficit of historical negatives
-        rand_s_sampled = np.random.choice(rand_s, size = num_samples // 6 + random_surplus[0], replace = False)
-        rand_d_sampled = np.random.choice(rand_d, size = num_samples // 6 + random_surplus[1], replace = False)
-        rand_p_sampled = np.random.choice(rand_p, size = num_samples // 6 + random_surplus[2], replace = False)
-        rand_s_sampled = [(s,pos_d,pos_p) for s in rand_s_sampled]
-        rand_d_sampled = [(pos_s,d,pos_p) for d in rand_d_sampled]
-        rand_p_sampled = [(pos_s, pos_d, p) for p in rand_p_sampled]
-        rand_sampled = rand_s_sampled + rand_d_sampled + rand_p_sampled 
-                              
-        all_negative_samples = hist_sampled + rand_sampled
-        return all_negative_samples
-            
-    return edge_sampler
-"""
+def convert_index_to_triplet(idx):
+    """
+    Convert single index back to (source, destination, product) triplet.
+    """
+    src = idx // (NUM_FIRMS * NUM_PRODS)
+    dst = (idx % (NUM_FIRMS * NUM_PRODS)) // NUM_PRODS
+    prod = idx % NUM_PRODS
+    prod = prod + NUM_FIRMS
+    return src, dst, prod
 
 def get_links_dict(temporal_edges, isTrain = False): #prepare to relax the condition a bit
     link_map, second_order_map, list_of_edges = {}, {}, []
@@ -279,58 +239,15 @@ def edge_sampler_wrapper(split): #returns an edge sampler function for either th
         pos_s, pos_d, pos_p, ts = key 
         ts_eval_edges = [(source, destination, product) for source, destination, product in E_eval[ts]]   
         ts_eval_edges_set = set(ts_eval_edges)  # positive edges at this timestep
+        ts_eval_edges_idx = [convert_triplet_to_index(s, d, p) for s,d,p in ts_eval_edges_set]
         
         # get historical negatives
         target_num_hist = num_samples // 2  # we want half of negative samples to be historical
-        num_hist_s = target_num_hist // 3
-        num_hist_d = target_num_hist // 3
-        num_hist_p = target_num_hist - num_hist_s - num_hist_d
-        
-        # sort train edges into groups
-        hist_s, hist_d, hist_p, loose_hist, no_overlap_hist = [], [], [], [], []
-        for hyperedge in E_train_edges:  # E_train_edges is a set of all edges that appeared in train
-            if hyperedge in ts_eval_edges_set:
-                continue 
-            num_node_matches = count_node_matches((pos_s, pos_d, pos_p), hyperedge)
-            if (num_node_matches == 2): # hist negative, check the perturbed node
-                if (hyperedge[0] != pos_s): # source perturbed
-                    hist_s.append(hyperedge)
-                elif (hyperedge[1] != pos_d): # destination perturbed
-                    hist_d.append(hyperedge)
-                else: # product perturbed 
-                    hist_p.append(hyperedge)
-            elif (num_node_matches == 1): # loose hist negative 
-                loose_hist.append(hyperedge)
-            else:
-                assert num_node_matches == 0
-                no_overlap_hist.append(hyperedge)
-#         print(key, len(hist_s), len(hist_d), len(hist_p), len(loose_hist), len(no_overlap_hist))
-        hist_candidates = hist_s + hist_d + hist_p
-    
-        # sample historical negatives - first try to get equal number of each type
-        hist_s_sampled = sample_from_list_of_triplets(hist_s, num_hist_s)
-        hist_d_sampled = sample_from_list_of_triplets(hist_d, num_hist_d) 
-        hist_p_sampled = sample_from_list_of_triplets(hist_p, num_hist_p)
-        hist_sampled = hist_s_sampled + hist_d_sampled + hist_p_sampled
-    
-        # if we haven't reached target num historical, sample from remaining historicals
-        num_remaining = target_num_hist - len(hist_sampled)
-        if num_remaining > 0: 
-            hist_remaining = set(hist_candidates) - set(hist_sampled)
-            more_hist_sampled = sample_from_list_of_triplets(list(hist_remaining), num_remaining)
-            hist_sampled += more_hist_sampled
-    
-        # if we still haven't reached target num historical, sample from loose historicals
-        num_remaining = target_num_hist - len(hist_sampled)
-        if num_remaining > 0:
-            loose_hist_sampled = sample_from_list_of_triplets(loose_hist, num_remaining)
-            hist_sampled += loose_hist_sampled
-            
-        # if we still haven't reached target num historical, sample from no-overlap historicals
-        num_remaining = target_num_hist - len(hist_sampled)
-        if num_remaining > 0:
-            no_overlap_hist_sampled = sample_from_list_of_triplets(no_overlap_hist, num_remaining)
-            hist_sampled += no_overlap_hist_sampled
+        to_keep = ~np.isin(E_train_edge_idx, ts_eval_edges_idx)
+        candidates = E_train_edge_idx[to_keep]  # all train edges that don't appear at this timestep in val
+        probs = E_train_counts[to_keep] / np.sum(E_train_counts[to_keep])  # sample proportional to train count
+        hist_sampled_idx = np.random.choice(candidates, size=target_num_hist, replace=False, p=probs)
+        hist_sampled = [convert_index_to_triplet(idx) for idx in hist_sampled_idx]
         assert len(hist_sampled) == target_num_hist, f'Couldn\'t find {target_num_hist} historical negatives for {key}; found {len(hist_sampled)}'       
 
         # get random negatives
@@ -364,6 +281,7 @@ def harness_negative_sampler(eval_ns_keys, split = "val", num_workers = 20, use_
         edge_sample = edge_sampler_wrapper(split)
     else:
         edge_sample = edge_sampler_deprecated_wrapper(split)
+    
     with mp.Pool(num_workers) as p:
         eval_ns_values = list(tqdm(p.imap(edge_sample, eval_ns_keys), total = len(eval_ns_keys)))
     eval_ns = {key: np.array(value).astype(np.float64) for key, value in zip(eval_ns_keys, eval_ns_values)}
@@ -389,7 +307,8 @@ if __name__ == "__main__":
     else:
         df, id2entity, product_min_id = process_csv(args.csv_file, args.metric, args.logscale, args.max_timestamp)
         df.to_csv(edgelist_fn, index = False)  # save edgelist
-    num_nodes, num_firms, num_products = len(id2entity), product_min_id, len(id2entity) - product_min_id
+    global NUM_FIRMS; global NUM_PRODS
+    num_nodes, NUM_FIRMS, NUM_PRODS = len(id2entity), product_min_id, len(id2entity) - product_min_id
     
     timestamps = sorted(list(df["ts"]))
     train_max_ts = np.percentile(timestamps, 70).astype(int)
@@ -399,8 +318,15 @@ if __name__ == "__main__":
     global E_train; global E_val; global E_test
     E_train, E_val, E_test = partition_edges(df, train_max_ts, val_max_ts, test_max_ts, use_prev_sampling = args.use_prev_sampling)
 
-    global E_train_edges
-    E_train_edges = set([(source, target, product) for ts in E_train for source, target, product in E_train[ts]])
+    global E_train_edge_idx; global E_train_counts
+    E_train_counter = Counter([(source, target, product) for ts in E_train for source, target, product in E_train[ts]])
+    E_train_edge_idx, E_train_counts = [], []
+    for (s,d,p), ct in E_train_counter.most_common():
+        E_train_edge_idx.append(convert_triplet_to_index(s, d, p))
+        E_train_counts.append(ct)
+    E_train_edge_idx = np.array(E_train_edge_idx)
+    E_train_counts = np.array(E_train_counts)
+    
     #create pool of node targets (firm & products) to be randomly selected during training 
     global num_samples; global L_firm; global L_products
     num_samples = args.num_samples
@@ -408,23 +334,20 @@ if __name__ == "__main__":
     L_products = list(range(product_min_id, len(id2entity)))
     print(len(L_firm), len(L_products))
 
-   # E_train_edges = [(s,d,p,t) for t in E_train for s,d,p in E_train[t]]
     if (args.use_prev_sampling == False):
+        E_train_edges = [(s,d,p,t) for t in E_train for s,d,p in E_train[t]]
+        assert len(E_train_edges) == np.sum(E_train_counts)
         E_val_edges = [(s,d,p,t) for t in E_val for s,d,p in E_val[t]]
         E_test_edges = [(s,d,p,t) for t in E_test for s,d,p in E_test[t]]
         print(f'Num edges: train={len(E_train_edges)}, val={len(E_val_edges)}, test={len(E_test_edges)}')
     
-        #train_ns = harness_negative_sampler(E_train_edges, split = "train", num_workers = args.workers)
-        val_ns = harness_negative_sampler(E_val_edges, split = "val", num_workers = args.workers)
-        assert len(val_ns) == len(E_val_edges), len(val_ns)
-        for pos_edge, negative_samples in val_ns.items():
-            assert len(negative_samples) == num_samples
-            
-        test_ns = harness_negative_sampler(E_test_edges, split = "test", num_workers = args.workers)
-        assert len(test_ns) == len(E_test_edges), len(test_ns)
-        for pos_edge, negative_samples in test_ns.items():
-            assert len(negative_samples) == num_samples
-
+        for split, edges in zip(['train', 'val', 'test'], [E_train_edges, E_val_edges, E_test_edges]):
+            eval_ns = harness_negative_sampler(edges, split=split, num_workers=args.workers)
+            assert len(eval_ns) == len(edges)
+            for pos_edge, negative_samples in eval_ns.items():
+                assert len(negative_samples) == num_samples
+            with open(os.path.join(args.dir,f'{args.dataset_name}_{split}_ns.pkl'), 'wb') as handle:
+                pickle.dump(eval_ns, handle, protocol=pickle.HIGHEST_PROTOCOL)
     else: 
         global val_ns_links; global test_ns_links
         num_samples = num_samples // 3
@@ -437,13 +360,6 @@ if __name__ == "__main__":
         
         for pos_edge, negative_samples in test_ns.items():
             assert len(negative_samples) == num_samples * 3
-        
-    # save out sampled negatives and metadata
-    with open(os.path.join(args.dir,f'{args.dataset_name}_val_ns.pkl'), 'wb') as handle:
-        pickle.dump(val_ns, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        
-    with open(os.path.join(args.dir, f'{args.dataset_name}_test_ns.pkl'), 'wb') as handle:
-        pickle.dump(test_ns, handle, protocol=pickle.HIGHEST_PROTOCOL)
     
     with open(meta_fn, "w") as file:
         meta = {"product_threshold": product_min_id, "id2entity": id2entity,
