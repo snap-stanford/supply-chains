@@ -530,6 +530,11 @@ def set_up_data(args, data, dataset):
     # apply log scaling and standard scaling to edge features
     for d in range(data.msg.shape[1]):
         vals = data.msg[:, d]
+        assert (vals >= 0).all()  # if we are logging, all values need to be positive
+        if d == 0:  # amount is first dimension
+            nan_count = torch.isnan(vals).sum()
+            zero_count = len(vals)-torch.count_nonzero(vals)
+            print('Scaling amount: %.3f are nan, %.3f are 0' % (nan_count/len(vals), zero_count/len(vals)))
         min_val = torch.min(vals[vals > 0])  # minimum value greater than 0
         vals = torch.clip(vals, min_val, None)  # clip so we don't take log of 0
         vals = torch.log(vals)  # log scale

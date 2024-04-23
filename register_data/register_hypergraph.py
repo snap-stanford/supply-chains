@@ -22,6 +22,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Extracting graph data from the transactions in logistic_data')
     parser.add_argument('dataset_name', help = "name to be assigned to dataset")
     parser.add_argument('dir', help = "directory to save data")
+    parser.add_argument('--sample_train', action='store_true', help = "if true, also sample negatives for train")
     parser.add_argument('--skip_process_csv', action='store_true', help = "if true, use already processed edgelist")
     parser.add_argument('--csv_file', nargs='?', default = "../hitachi-supply-chains/temporal_graph/storage/daily_transactions_2021.csv", help = "path to CSV file with transactions")
     parser.add_argument('--metric', nargs='?', default = "total_amount", help = "either total amount (in USD), which is default, or weight")
@@ -341,7 +342,10 @@ if __name__ == "__main__":
         E_test_edges = [(s,d,p,t) for t in E_test for s,d,p in E_test[t]]
         print(f'Num edges: train={len(E_train_edges)}, val={len(E_val_edges)}, test={len(E_test_edges)}')
     
-        for split, edges in zip(['train', 'val', 'test'], [E_train_edges, E_val_edges, E_test_edges]):
+        splits = ['train', 'val', 'test']
+        list_of_edges = [E_train_edges, E_val_edges, E_test_edges]
+        start_idx = 0 if args.sample_train else 1
+        for split, edges in zip(splits[start_idx:], list_of_edges[start_idx:]):
             eval_ns = harness_negative_sampler(edges, split=split, num_workers=args.workers)
             assert len(eval_ns) == len(edges)
             for pos_edge, negative_samples in eval_ns.items():
