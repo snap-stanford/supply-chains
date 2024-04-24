@@ -325,4 +325,40 @@ class PyGLinkPropPredDatasetHyper(PyGLinkPropPredDataset):
         )
         return data
 
+
+class TimeSpecificDataLoader:
+    """
+    Custom data loader so that we can batch by t.
+    """
+    def __init__(self, data : TemporalData):
+        self.data = data
+        self.unique_t = data.t.unique()
+        self.idx = 0
+        self.reset()
+        
+    def __iter__(self):
+        return self
     
+    def reset(self):
+        """
+        Reset t to first timestep.
+        """
+        self.idx = 0
+    
+    def __next__(self):
+        """
+        Return the current batch for t and increment t.
+        """
+        if self.idx < len(self.unique_t):
+            t = self.unique_t[self.idx]
+            batch = self.data[self.data.t == t]
+            self.idx += 1
+            return batch
+        self.reset()
+        raise StopIteration
+    
+    def __len__(self):
+        """
+        Return number of batches.
+        """
+        return len(self.unique_t)

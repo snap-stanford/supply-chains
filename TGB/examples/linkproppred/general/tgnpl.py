@@ -33,7 +33,7 @@ from modules.neighbor_loader import LastNeighborLoaderTGNPL
 from modules.memory_module import TGNPLMemory, StaticMemory
 from modules.inventory_module import TGNPLInventory
 from modules.early_stopping import  EarlyStopMonitor
-from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper
+from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper, TimeSpecificDataLoader
 
 # ===========================================
 # == Main functions to train and test model
@@ -392,8 +392,10 @@ def get_tgnpl_args():
     parser.add_argument('--seed', type=int, help='Random seed', default=1)
     parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
     parser.add_argument('--bs', type=int, help='Batch size', default=200)
+    parser.add_argument('--batch_by_t', action="store_true", help='Batch by t instead of fixed batch size; overrides --bs')
     parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
+    parser.add_argument('--ignore_patience_num_epoch', type=int, default=20, help='how many epochs we run before considering patience')
     parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
     parser.add_argument('--num_train_days', type=int, help='How many days to use for training; used for debugging and faster training', default=-1)
     parser.add_argument('--train_on_val', action='store_true', help='Train on validation set with fixed negative sampled; used for debugging')
@@ -404,8 +406,6 @@ def get_tgnpl_args():
     parser.add_argument('--wandb', action='store_true', help='Wandb support')
     parser.add_argument('--tensorboard', action='store_true', help='Tensorboard support')
     parser.add_argument('--gpu', type=int, help='Which GPU to use', default=0)
-    
-    parser.add_argument('--ignore_patience_num_epoch', type=int, default=20, help='how many epochs we run before considering patience')
     
     try:
         args = parser.parse_args()
@@ -560,10 +560,15 @@ def set_up_data(args, data, dataset):
            len(test_data), len(test_data.t.unique()))
     )
         
-    train_loader = TemporalDataLoader(train_data, batch_size=args.bs)
-    val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
-    test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
-    
+    if args.batch_by_t:
+        train_loader = TimeSpecificDataLoader(train_data)
+        val_loader = TimeSpecificDataLoader(val_data)
+        test_loader = TimeSpecificDataLoader(test_data)
+    else:
+        train_loader = TemporalDataLoader(train_data, batch_size=args.bs)
+        val_loader = TemporalDataLoader(val_data, batch_size=args.bs)
+        test_loader = TemporalDataLoader(test_data, batch_size=args.bs)
+
     return train_loader, val_loader, test_loader
     
 def run_experiment(args):
