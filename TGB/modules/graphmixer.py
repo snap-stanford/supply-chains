@@ -16,13 +16,15 @@ class GraphMixer(nn.Module):
         TCL model.
         :param node_raw_features: Tensor, shape (num_nodes + 1, node_feat_dim)
         :param edge_feat_dim: int, edge feature dimension (axis=1)
-        # :param neighbor_sampler: neighbor sampler
         :param time_feat_dim: int, dimension of time features (encodings)
         :param num_tokens: int, number of tokens
         :param num_layers: int, number of transformer layers
         :param token_dim_expansion_factor: float, dimension expansion factor for tokens
         :param channel_dim_expansion_factor: float, dimension expansion factor for channels
         :param dropout: float, dropout rate
+        :param time_gap: number of neighbors to load per node when constructing node features
+        :param debug: print when debugging
+        :param mimic_static_debug: construct graphmixer similar to tgnpl static when debugging
         """
         super(GraphMixer, self).__init__()
 
@@ -93,7 +95,7 @@ class GraphMixer(nn.Module):
         # neighbor_edge_ids, tensor, shape (batch_size, num_neighbors)
         # neighbor_times, tensor, shape (batch_size, num_neighbors)
         # neighbor_edge_features, tensor, shape (batch_size, num_neighbors, edge_feat_dim)
-        neighbor_node_ids, _, neighbor_edge_ids, neighbor_times, neighbor_edge_features = self.neighbor_sampler(node_ids)
+        neighbor_node_ids, _, neighbor_edge_ids, neighbor_times, neighbor_edge_features = self.neighbor_sampler(n_id=node_ids, size=self.num_neighbors)
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim)
         nodes_edge_raw_features = neighbor_edge_features
@@ -124,10 +126,10 @@ class GraphMixer(nn.Module):
         # node encoder
         # get temporal neighbors of nodes, including neighbor ids
         # time_gap_neighbor_node_ids, ndarray, shape (batch_size, time_gap)
-        # time_gap_neighbor_node_ids, _, _ = self.neighbor_sampler.get_historical_neighbors(node_ids=node_ids,
-        #                                                                                node_interact_times=node_interact_times,
-        #                                                                                num_neighbors=self.time_gap)
-        time_gap_neighbor_node_ids = neighbor_node_ids # TODO: simplified version now, assuming args.time_gap == args.num_neighbors
+        time_gap_neighbor_node_ids, _, _, _, _ = self.neighbor_sampler(n_id=node_ids, size=self.time_gap)
+#         time_gap_neighbor_node_ids = neighbor_node_ids # Here's a simplified version that assumes args.time_gap == args.num_neighbors
+        if self.debug:
+            print("time_gap_neighbor_node_ids (shape, value)", time_gap_neighbor_node_ids.shape, time_gap_neighbor_node_ids)
 
         # Tensor, shape (batch_size, time_gap, node_feat_dim)
         nodes_time_gap_neighbor_node_raw_features = self.node_raw_features[time_gap_neighbor_node_ids]

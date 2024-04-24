@@ -170,34 +170,27 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     
 def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                        num_firms=None, num_products=None):
-    """
-    Update inventory per firm based on latest batch and compute losses.
-    """
-    # TODO: complete inventory module later
-    # # use global variables when arguments are not specified
-    # if num_firms is None:
-    #     num_firms = NUM_FIRMS
-    # if num_products is None:
-    #     num_products = NUM_PRODUCTS
-    # num_nodes = num_firms + num_products
-    # # Helper vector to map global node indices to local ones
-    # assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
+#     """
+#     Update inventory per firm based on latest batch and compute losses.
+#     """
+#     # use global variables when arguments are not specified
+#     if num_firms is None:
+#         num_firms = NUM_FIRMS
+#     if num_products is None:
+#         num_products = NUM_PRODUCTS
+#     num_nodes = num_firms + num_products
+#     # Helper vector to map global node indices to local ones
+#     assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
     
-    # # get product embeddings
-    # f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
-    # p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
-    # n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
-    # assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
-    # memory, last_update, update_loss = model['memory'](n_id)
-    # z = model['gnn'](
-    #     memory,
-    #     last_update,
-    #     edge_index,
-    #     repeat_tensor(data.t, 2)[e_id].to(device),
-    #     repeat_tensor(data.msg, 2)[e_id].to(device),
-    # )
-    # prod_embs = z[assoc[p_id]]
-    # inv_loss, debt_loss, consump_rwd_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
+#     prod, t = batch.prod.flatten(), batch.t.flatten()
+#     # TODO: think about how to .unique() since we can have different timestamps in the same batch for a fixed node
+    
+#     # Only compute product node embedding to save time
+#     model['graphmixer'].neighbor_sampler = neighbor_loader
+#     prod_embs = model['graphmixer'].compute_node_temporal_embeddings(node_ids=prod, node_interact_times=t)
+   
+#     # prod_embs has shape (num_products, num_products)
+#     inv_loss, debt_loss, consump_rwd_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
     inv_loss, debt_loss, consump_rwd_loss = 0, 0, 0
     return inv_loss, debt_loss, consump_rwd_loss
 
@@ -288,7 +281,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         if update_params:
             loss.backward()
             optimizer.step()
-            # model['memory'].detach()
+#             model['memory'].detach()
             if 'inventory' in model:
                 model['inventory'].detach()
 
@@ -397,11 +390,16 @@ def get_graphmixer_args():
     parser.add_argument('--train_on_val', type=bool, default=False, help='If true, train on validation set with fixed negative sampled; used for debugging')
     parser.add_argument('--use_prev_sampling', action='store_true', help = "if true, use previous hypergraph sampling method")
 
-    # TODO: add more args for graphmixer
+    # Additional args for graphmixer
     parser.add_argument('--num_layers', type=int, default=2, help='number of model layers')
     parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
     parser.add_argument('--num_neighbors', type=int, default=10, help='number of neighbors')
     parser.add_argument('--time_gap', type=int, default=2000, help='time gap')
+    parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
+    parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
+    
+    # Additional early stopper argument, not in TGNPL yet
+    parser.add_argument('--ignore_patience_num_epoch', type=int, default=50, help='how many epochs we run before considering patience')
 
     try:
         args = parser.parse_args()
@@ -461,12 +459,11 @@ def set_up_model(args, data, device, num_firms=None, num_products=None, mimic_st
     node_raw_features = torch.eye(num_nodes).to(device) # since node features is None here, one_hot encoding of node id
     edge_feat_dim = data.msg.shape[1]
     graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
-                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, mimic_static_debug=mimic_static_debug).to(device) # TODO: delete debug flag
+                            time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, token_dim_expansion_factor=args.token_dim_expansion_factor, channel_dim_expansion_factor=args.channel_dim_expansion_factor, mimic_static_debug=mimic_static_debug).to(device) # TODO: delete debug flag
 
     # initialize 
-#     link_pred = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1], input_dim3=node_raw_features.shape[1], 
-#                             hidden_dim=node_raw_features.shape[1], output_dim=1).to(device)
-    link_pred = LinkPredictorTGNPL(node_raw_features.shape[1]).to(device) # exactly the same as MergeLayer
+#     link_pred = MergeLayer(input_dim1=node_raw_features.shape[1], input_dim2=node_raw_features.shape[1], input_dim3=node_raw_features.shape[1], hidden_dim=node_raw_features.shape[1], output_dim=1).to(device)
+    link_pred = LinkPredictorTGNPL(node_raw_features.shape[1]).to(device) # same as MergeLayer, but without .sigmoid() at the outmost layer
 
     # put together in model and initialize optimizer
     model = {'graphmixer': graphmixer,
@@ -611,7 +608,7 @@ def run_experiment(args):
             raise Exception('Failed to initialize model with weights')
             
     # Initialize neighbor loader
-    neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, size=args.num_neighbors, edge_feat_dim=data.msg.shape[1], device=device)
+    neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, num_neighbors=args.num_neighbors, time_gap=args.time_gap, edge_feat_dim=data.msg.shape[1], device=device)
 
     print("==========================================================")
     print(f"=================*** {MODEL_NAME}: LinkPropPred: {args.dataset} ***=============")
@@ -626,7 +623,7 @@ def run_experiment(args):
         # define an early stopper
         save_model_id = f'{exp_id}_{run_idx}'
         early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
-                                         tolerance=args.tolerance, patience=args.patience)
+                                         tolerance=args.tolerance, patience=args.patience, ignore_patience_num_epoch=args.ignore_patience_num_epoch)
 
         # ==================================================== Train & Validation
         dataset.load_val_ns()  # load validation negative samples
@@ -642,7 +639,6 @@ def run_experiment(args):
                                                     neg_sampler=neg_sampler, split_mode="val", 
                                                     use_prev_sampling = args.use_prev_sampling)
                 # Reset memory and graph for beginning of val
-                # TODO: reset
                 # model['memory'].reset_state()  
                 neighbor_loader.reset_state()
             else:
