@@ -405,6 +405,8 @@ def get_tgnpl_args():
     parser.add_argument('--tensorboard', action='store_true', help='Tensorboard support')
     parser.add_argument('--gpu', type=int, help='Which GPU to use', default=0)
     
+    parser.add_argument('--ignore_patience_num_epoch', type=int, default=20, help='how many epochs we run before considering patience')
+    
     try:
         args = parser.parse_args()
         defaults = parser.parse_args([])
@@ -668,7 +670,8 @@ def run_experiment(args):
         # define an early stopper
         save_model_id = f'{exp_id}_{run_idx}'
         early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
-                                         tolerance=args.tolerance, patience=args.patience)
+                                                         tolerance=args.tolerance, patience=args.patience,
+                                                         ignore_patience_num_epoch=args.ignore_patience_num_epoch)
 
         # ==================================================== Train & Validation
         train_loss_list = []

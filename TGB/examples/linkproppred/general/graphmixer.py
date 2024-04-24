@@ -398,8 +398,7 @@ def get_graphmixer_args():
     parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
     parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
     
-    # Additional early stopper argument, not in TGNPL yet
-    parser.add_argument('--ignore_patience_num_epoch', type=int, default=50, help='how many epochs we run before considering patience')
+    parser.add_argument('--ignore_patience_num_epoch', type=int, default=20, help='how many epochs we run before considering patience')
 
     try:
         args = parser.parse_args()
