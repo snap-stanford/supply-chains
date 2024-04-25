@@ -116,6 +116,9 @@ if __name__ == "__main__":
     args = get_args()
     df = pd.read_csv(args.sem_filepath)
     print("Loaded in {} raw entries from the SEM dataset at {}!\n...".format(len(df), args.sem_filepath))
+
+    # Extra preprocess to deal with NaN time values
+    df = df[~df.date.isna()]
     
     map_id2company = get_company_idname_map(df)
     df_tesla = preprocess_tesla(df, args.start_date, args.use_titles, map_id2company,
