@@ -117,8 +117,9 @@ if __name__ == "__main__":
     df = pd.read_csv(args.sem_filepath)
     print("Loaded in {} raw entries from the SEM dataset at {}!\n...".format(len(df), args.sem_filepath))
 
-    # Extra preprocess to deal with NaN time values
-    df = df[~df.date.isna()]
+    # Extra preprocess to deal with 7 negative amount_sum rows: they exist in data provider source
+    df = df[df.amount_sum >= 0]
+    print("After removing 7 negative amount_sum rows, there are {} raw entries\n".format(len(df)))
     
     map_id2company = get_company_idname_map(df)
     df_tesla = preprocess_tesla(df, args.start_date, args.use_titles, map_id2company,
