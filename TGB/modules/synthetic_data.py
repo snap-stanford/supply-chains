@@ -2,16 +2,15 @@ from collections import Counter
 import json
 import matplotlib.pyplot as plt
 import networkx as nx
+from node2vec import Node2Vec
 import numpy as np
 import os
 import pandas as pd
 import pickle
 from scipy.sparse import csr_matrix
 from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import pairwise_distances
 import torch
-
-from inventory_module import TGNPLInventory
-
 
 DATA = 'tgbl-hypergraph_synthetic'
 DATA_DIR = f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{DATA.replace('-', '_')}/"
@@ -19,48 +18,106 @@ DATA_DIR = f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{DATA
 ###################################################
 # Functions to generate synthetic data
 ###################################################
-def generate_static_graphs(max_firms, seed=0, min_units=1, max_units=4):
+def make_product_graph(num_exog=5, num_consumer=5, num_inner_layers=4, num_per_layer=10,
+                       min_inputs=2, max_inputs=4, min_units=1, max_units=4, seed=0):
     """
-    Generate static graphs: product-product, firm-product, firm-firm.
+    Generate DAG of products (edge is part-product relation).
     """
     np.random.seed(seed)
-    # get product graph
-    prod_graph = pd.read_table(os.path.join(DATA_DIR, 'product_graph.psv'), sep="|")
-    prod_graph['units'] = np.random.randint(low=min_units, high=max_units+1, size=len(prod_graph))  # add units per source, dest
-    G = nx.DiGraph()
-    edges = list(zip(prod_graph.source.values, prod_graph.dest.values))
-    G.add_edges_from(edges)
-    assert len(list(nx.simple_cycles(G))) == 0  # check for cycles, there should be none
-    products = list(nx.topological_sort(G))  # topological order
+    num_prods = num_exog + num_consumer + (num_inner_layers*num_per_layer)
+    prods = [f'product{i}' for i in range(num_prods)]
+    prod_pos = np.random.random(size=(num_prods, 2))
     
-    # assign products to supplier firms
+    prod_graph = []
+    start_idx = num_exog
+    prev_prods = prods[:num_exog]
+    prev_pos = prod_pos[:num_exog]
+    layers = [0] * num_exog
+    for l in range(num_inner_layers+1):
+        if l < num_inner_layers:
+            curr_prods = prods[start_idx:start_idx+num_per_layer]  # inner layer
+            curr_pos = prod_pos[start_idx:start_idx+num_per_layer]
+        else:
+            curr_prods = prods[start_idx:]  # consumer prods
+            curr_pos = prod_pos[start_idx:]
+        
+        dists = pairwise_distances(curr_pos, prev_pos)
+        utils = np.exp(-dists)
+        for i, p in enumerate(curr_prods):
+            num_inputs = np.random.randint(min_inputs, max_inputs+1)
+            sorted_prev = np.argsort(dists[i])
+            inputs = [prev_prods[j] for j in sorted_prev[:num_inputs]]  # use closest products as inputs
+            units = np.random.randint(min_units, max_units+1, size=num_inputs)
+            prod_graph.extend(list(zip(inputs, [p] * num_inputs, units, [l+1] * num_inputs)))  # source, dest, units, layer
+            layers.append(l+1)
+            
+        start_idx += num_per_layer
+        prev_prods = curr_prods
+        prev_pos = curr_pos
+    
+    prod_graph = pd.DataFrame(prod_graph, columns=['source', 'dest', 'units', 'layer'])
+    print(f'Made product graph: {num_prods} products, {len(prod_graph)} part-product edges')
+    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input    
+    print(f'{len(consumer_prods)} consumer products (ie, not inputs for anything)')
+    return prods, layers, prod_pos, prod_graph
+
+
+def make_supplier_product_graph(max_firms, products, prod_pos, seed=0):
+    """
+    Assign products to supplier firms.
+    """
+    np.random.seed(seed)
     firms = [f'firm{i}' for i in range(max_firms)]
+    firm_pos = np.random.random(size=(max_firms, 2))
+    dists = pairwise_distances(prod_pos, firm_pos)
+    utils = np.exp(-dists)
+    
     prod2firms = {}  # product to supplier firms
     firm2prods = {f:[] for f in firms}  # firm to products supplied
-    num_prods_per_firm = np.zeros(len(firms))
     min_suppliers_per_prod = int(np.round(max_firms/100))
     max_suppliers_per_prod = min_suppliers_per_prod*4
     print(f'Num suppliers per product: {min_suppliers_per_prod}-{max_suppliers_per_prod}')
-    for p in products:
+
+    for i, p in enumerate(products):
         num_suppliers = np.random.randint(min_suppliers_per_prod, max_suppliers_per_prod+1)
-        firm_probs = (num_prods_per_firm+1) / (np.sum(num_prods_per_firm)+len(firms))
-        suppliers = np.random.choice(firms, size=num_suppliers, replace=False, p=firm_probs)  # preferential attachment
+        sorted_firms = np.argsort(dists[i])
+        suppliers = [firms[j] for j in sorted_firms[:num_suppliers]]  # use closest firms as suppliers
         prod2firms[p] = suppliers
         for f in suppliers:
             firm2prods[f].append(p)
-            num_prods_per_firm[int(f[4:])] += 1  # first four letters are 'firm'
-    firms = [f for f in firms if len(firm2prods[f]) > 0]  # keep firms with at least one product
+    to_keep = [j for j,f in enumerate(firms) if len(firm2prods[f]) > 0]  # keep firms with at least one product
+    firms = list(np.array(firms)[to_keep])
+    firm_pos = firm_pos[to_keep]
     print(f'Keeping {len(firms)} out of {max_firms} firms with at least one product')
-    firms = sorted(firms, key=lambda x: len(firm2prods[f]), reverse=True)  # sort from most to least products
+    return firms, firm_pos, firm2prods, prod2firms
     
-    # assign supplier firms for each firm, based on products supplied 
+    
+def make_supplier_buyer_graph(firms, prod_graph, firm2prods, prod2firms, seed=0):
+    """
+    Assign supplier firms to buyer firms.
+    """
+    np.random.seed(seed)
     inputs2supplier = {}  # (buyer firm, product) to supplier firm
+    num_buyers_per_firm = {f:0 for f in firms}
     for f in firms:
         inputs_needed = prod_graph[prod_graph['dest'].isin(firm2prods[f])].source.unique()  # all inputs needed by f
         for src in inputs_needed:
-            supplier = np.random.choice(prod2firms[src])
-            inputs2supplier[(f, src)] = supplier
+            suppliers = prod2firms[src]  # all possible suppliers for this input
+            utils = np.array([num_buyers_per_firm[s] for s in suppliers]) + 1  
+            supp = np.random.choice(suppliers, p=utils/np.sum(utils))  # preferential attachment
+            inputs2supplier[(f, src)] = supp
+            num_buyers_per_firm[supp] = num_buyers_per_firm[supp] + 1
+    print(f'Assigned suppliers to (buyer, product): {len(inputs2supplier)} edges')
+    return inputs2supplier
     
+    
+def generate_static_graphs(max_firms, seed=0):
+    """
+    Generate static graphs: product-product, firm-product, firm-firm.
+    """
+    products, layers, prod_pos, prod_graph = make_product_graph(seed=seed)
+    firms, firm_pos, firm2prods, prod2firms = make_supplier_product_graph(max_firms, products, prod_pos, seed=seed)    
+    inputs2supplier = make_supplier_buyer_graph(firms, prod_graph, firm2prods, prod2firms, seed=seed)
     return firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier
     
 
@@ -81,7 +138,6 @@ def generate_initial_conditions(firms, products, prod_graph, prod2firms, init_in
     
     # initialize demand for consumer products
     consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input
-    assert sorted(consumer_prods) == sorted(products[-len(consumer_prods):])
     curr_orders = {}  # maps (supplier, product) to list of orders as (buyer, amount)
     for p in products:
         for f in prod2firms[p]:
@@ -132,8 +188,8 @@ def generate_demand_schedule(num_timesteps, prod_graph, prod2firms, seed=0, min_
     
 
 def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, seed=0, 
-                                       default_supply=1000, shock_supply=10, shock_prob=0.001, 
-                                       shock_probs=None, recovery_rate=1.2):
+                                       default_supply=1e6, shock_supply=100, shock_prob=0.001, 
+                                       shock_probs=None, recovery_rate=1.25):
     """
     Generate schedule of supply for exogenous products with possible shocks to supply.
     """
@@ -256,11 +312,7 @@ def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  #
             break
         
     all_transactions = pd.concat(all_transactions)
-    orig_len = len(all_transactions)
-    # it's possible for there to be multiple of the same triplet on a day if a firm processes multiple orders
-    # for the same buyer, product -> sum over amount
-    all_transactions = all_transactions.groupby(['supplier_id', 'buyer_id', 'product_id', 'time']).sum().reset_index()
-    print(f'Grouped by supplier, buyer, product, and time -> reduced {orig_len} transactions to {len(all_transactions)}')
+    assert len(all_transactions) == len(all_transactions.drop_duplicates(['supplier_id', 'buyer_id', 'product_id', 'time']))
     return all_transactions
         
 
@@ -280,7 +332,7 @@ def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-va
     """    
     inventories = inventories.copy()  # copy bc it'll be modified
     curr_orders = curr_orders.copy()  # copy bc it'll be modified
-    transactions_completed = []  # list of (supplier_id, buyer_id, product_id, amount)
+    amount_supplied = {}  # maps (buyer_id, product_id) to amount supplied in this round
     inputs_needed = np.zeros(len(products))  # what inputs are still needed for unfulfilled orders
     f_idx = firm2idx[f]
     
@@ -302,9 +354,10 @@ def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-va
                 supply = exog_supp[(f,p)]
                 for buyer, amt in fp_orders:
                     assert buyer != 'consumer'  # consumers don't buy exogenous products directly
+                    bp_key = firm2idx[buyer], p_idx
                     if amt <= supply:
                         supply -= amt
-                        transactions_completed.append((f_idx, firm2idx[buyer], p_idx, amt))
+                        amount_supplied[bp_key] = amount_supplied.get(bp_key, 0) + amt
                         order_num += 1 
                     else:
                         break
@@ -314,7 +367,8 @@ def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-va
                     if (inventories[f_idx] >= order_inputs_needed).all():  # need to have enough of all inputs
                         inventories[f_idx] -= order_inputs_needed  # subtract from inventory
                         if buyer != 'consumer':
-                            transactions_completed.append((f_idx, firm2idx[buyer], p_idx, amt))
+                            bp_key = firm2idx[buyer], p_idx
+                            amount_supplied[bp_key] = amount_supplied.get(bp_key, 0) + amt
                         order_num += 1 
                     else:
                         break
@@ -330,6 +384,9 @@ def simulate_actions_for_firm(f, inventories, curr_orders, exog_supp,  # time-va
                 print('After processing...')
                 print_firm_and_product_status(f_idx, p_idx, inventories, curr_orders, inputs_needed, firms, products)
     
+    transactions_completed = []
+    for (b_idx, p_idx), amt in amount_supplied.items():
+        transactions_completed.append((f_idx, b_idx, p_idx, amt))
     return inventories, curr_orders, transactions_completed, inputs_needed
 
 
@@ -391,7 +448,6 @@ def get_prod_mat(prod_graph, prod2idx):
     col_idx = [prod2idx[p] for p in prod_graph['source'].values]
     m = csr_matrix((prod_graph['units'].values, (row_idx, col_idx)), shape=(len(prod2idx), len(prod2idx))).toarray()
     return m
-
 
 def get_stats_on_firm_network(inputs2supplier):
     """
@@ -475,6 +531,7 @@ def get_best_corr_with_lag(buy_ts, supp_ts, max_lag=7):
             best_lag = lag
     return best_corr, best_lag
 
+
 def eval_timeseries_for_product(prod, transactions, firms, products, firm2idx, prod2idx,
                                 prod_graph, firm2prods, prod2firms, make_plots=True):
     """
@@ -537,16 +594,18 @@ def eval_timeseries_for_product(prod, transactions, firms, products, firm2idx, p
                     buy_ts = convert_txns_to_timeseries(buy_df[buy_df['product_id'] == prod2idx[b]], min_t, max_t)
                     best_corr, best_lag = get_best_corr_with_lag(buy_ts, supp_ts)
                     neg_corrs.append(best_corr)
+                print('Neg corrs:', np.round(neg_corrs, 3))
             if make_plots:
                 ax.legend()
                 ax = axes[1]
-                ax.hist(neg_corrs, color='blue', bins=20)
                 ymin, ymax = ax.get_ylim()
                 ax.vlines(pos_corrs, ymin, ymax, color='red')
+                ax.vlines(neg_corrs, ymin, ymax, color='grey')
                 plt.show()            
         else:
             print(f'Never supplied {prod} in transactions; skipping')
     return conditions2corrs
+
 
 def measure_temporal_variation_in_triplets(transactions, verbose=False):
     """
@@ -596,9 +655,11 @@ def measure_temporal_variation_in_triplets(transactions, verbose=False):
     plt.plot(t_range[1:], new_to_seen_prev, label='New triplet, rel to t-1')
     plt.plot(t_range[1:], seen_missing, label='Missing triplet, all')
     plt.plot(t_range[1:], seen_prev_missing, label='Missing triplet, rel to t-1')
+    plt.ylim(-0.1, 1.1)
     plt.legend()
     plt.grid(alpha=0.2)
     plt.show()
+    
     
 def check_negative_sampling(data_name, neg_samples=18, split='val'):
     """
@@ -663,176 +724,3 @@ def check_negative_sampling(data_name, neg_samples=18, split='val'):
     for i in sorted(set(num_overlap_historicals)):
         num_data_points = np.sum(np.array(num_overlap_historicals) == i)
         print(f'Num overlap historicals = {i} -> {num_data_points} ({num_data_points/len(eval_ns):0.3f})')
-        
-
-###################################################
-# Functions to evaluate against ground-truth production functions
-###################################################
-def predict_product_relations_with_corr(transactions, products):
-    """
-    Create matrix of predicted relationships between products based on temporal correlation.
-    """
-    min_t = np.min(transactions.time.values)
-    max_t = np.max(transactions.time.values)
-    m = np.zeros((len(products), len(products)))
-    for p_idx in range(len(products)):
-        prod_txns = transactions[transactions['product_id'] == p_idx]  
-        if len(prod_txns) > 0:  # should be 0 for consumer products
-            candidates = {}
-            for s_idx, supp_df in prod_txns.groupby('supplier_id'):  # iterate through suppliers
-                supp_ts = convert_txns_to_timeseries(supp_df, min_t, max_t)
-                buy_df = transactions[transactions['buyer_id'] == s_idx]  # all txns where s is buying
-                for b_idx, buy_df_s in buy_df.groupby('product_id'):  # group by products bought
-                    buy_ts = convert_txns_to_timeseries(buy_df, min_t, max_t)
-                    best_corr, best_lag = get_best_corr_with_lag(buy_ts, supp_ts)
-                    candidates[b_idx] = candidates.get(b_idx, []) + [best_corr]
-            for b_idx, corrs in candidates.items():
-                m[p_idx, b_idx] = np.mean(corrs)
-    return m
-
-
-def predict_product_relations_with_inventory_module(transactions, firms, products, prod2idx, prod_graph, 
-                                                    debt_penalty=None, consumption_reward=None,
-                                                    init_weights=None, num_epochs=50, patience=5, 
-                                                    show_weights=True):
-    """
-    Train inventory module with direct attention on synthetic data, return final attention weights.
-    """
-    # initialize inventory module
-    device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
-    module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True,
-                   'device': device}
-    if debt_penalty is not None and consumption_reward is not None:
-        module_args['debt_penalty'] = debt_penalty
-        module_args['consumption_reward'] = consumption_reward
-    if init_weights is not None:
-        module_args['init_weights'] = init_weights
-    module = TGNPLInventory(**module_args)                
-    opt = torch.optim.Adam(module.parameters())
-    
-    # train inventory module
-    losses = []
-    maps = []
-    min_t = transactions.time.min()
-    max_t = transactions.time.max()
-    for ep in range(num_epochs):
-        for t in range(min_t, max_t+1):
-            to_keep = transactions.time.values == t
-            src = torch.Tensor(transactions.supplier_id.values[to_keep]).long().to(device)
-            dst = torch.Tensor(transactions.buyer_id.values[to_keep]).long().to(device)
-            prod = torch.Tensor(transactions.product_id.values[to_keep]).long().to(device) + len(firms)
-            msg = torch.Tensor(transactions.amount.values[to_keep].reshape(-1, 1)).to(device)
-            
-            opt.zero_grad()
-            loss, debt_loss, cons_loss = module(src, dst, prod, msg)
-            loss.backward(retain_graph=False)
-            opt.step()
-            module.detach()
-            losses.append((float(loss), float(debt_loss), float(cons_loss)))
-            
-        weights = module._get_prod_attention().cpu().detach().numpy()
-        mean_avg_pr = mean_average_precision(prod_graph, prod2idx, weights)
-        maps.append(mean_avg_pr)
-        
-        if show_weights and (ep % 5) == 0:
-            pos = plt.imshow(weights)
-            plt.colorbar(pos)
-            plt.title(f'Ep {ep}')
-            plt.show()
-        module.reset()  # reset inventory
-    return losses, maps, weights
-
-    
-def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=False):
-    """
-    Compute mean average precision over products, given a prediction matrix where rows are products
-    and columns are their predicted inputs.
-    """
-    avg_prec_per_prod = []
-    for p, p_idx in prod2idx.items():
-        inputs = [prod2idx[s] for s in prod_graph[prod_graph['dest'] == p].source.values]  # true inputs
-        is_consumer_prod = len(prod_graph[prod_graph['source'] == p]) == 0  
-        if len(inputs) > 0:  # skip exogenous products since they have no inputs
-            ranking = list(np.argsort(-pred_mat[p_idx]))
-            total = 0
-            for s_idx in inputs:
-                k = ranking.index(s_idx)+1  # get the rank of input s_idx; rank and index are off-by-one
-                prec_at_k = np.mean(np.isin(ranking[:k], inputs))  # how many of top k are true inputs
-                total += prec_at_k
-            avg_prec = total/len(inputs)
-            if verbose:
-                print(f'{p} (consumer prod: {is_consumer_prod}): avg precision={avg_prec:0.4f}')
-            avg_prec_per_prod.append(avg_prec)
-    return np.mean(avg_prec_per_prod)
-
-
-def gridsearch_on_hyperparameters():
-    """
-    Gridsearch over scaling between debt penalty vs consumption reward.
-    """
-    with open('./synthetic_data.pkl', 'rb') as f:
-        firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier, demand_schedule = pickle.load(f)
-    prod2idx = {p:i for i,p in enumerate(products)}
-    
-    transactions = pd.read_csv(f'./standard_setting_all_transactions.csv')
-    print(f'Loaded all transactions -> {len(transactions)} transactions')
-    corr_m = predict_product_relations_with_corr(transactions, products)
-    corr_map = mean_average_precision(prod_graph, prod2idx, corr_m)
-    print(f'Temporal correlations: MAP={corr_map:.4f}')
-        
-    debt_penalty = 10
-    for scaling in np.arange(0.1, 1.1, 0.1):
-        consumption_reward = debt_penalty * scaling
-        losses, maps, inv_m = predict_product_relations_with_inventory_module(
-            transactions, firms, products, prod2idx, prod_graph, init_weights=corr_m, 
-            debt_penalty=debt_penalty, consumption_reward=consumption_reward, 
-            show_weights=False)
-        print(f'Debt penalty = {debt_penalty}, scaling = {scaling} -> final MAP={maps[-1]:0.4f}, best MAP={np.max(maps):0.4f}')
-        print('Last 5 MAPs:', np.round(maps[-5:], 3))
-        print()
-            
-    
-def compare_methods_across_standard_data_settings(data_settings, num_rand_inits=10, 
-                                                  debt_penalty=None, consumption_reward=None):
-    """
-    Evaluate production learning methods on standard synthetic data with different settings:
-    varying amounts of missingness in transactions, varying amounts of missingness in firms.
-    """
-    with open('./synthetic_data.pkl', 'rb') as f:
-        firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier, demand_schedule = pickle.load(f)
-    prod2idx = {p:i for i,p in enumerate(products)}
-    
-    print(f'For all experiments, using debt_penalty={debt_penalty} and consumption_reward={consumption_reward}')
-    for setting in data_settings:
-        transactions = pd.read_csv(f'./standard_setting_{setting}.csv')
-        print(f'Setting: {setting} -> {len(transactions)} transactions')
-
-        corr_m = predict_product_relations_with_corr(transactions, products)
-        corr_map = mean_average_precision(prod_graph, prod2idx, corr_m)
-        print(f'Temporal correlations: MAP={corr_map:.4f}')
-        
-        # when inventory module is randomly initialized
-        final_maps = []
-        for i in range(num_rand_inits):
-            torch.manual_seed(i)
-            losses, maps, inv_m = predict_product_relations_with_inventory_module(
-                transactions, firms, products, prod2idx, prod_graph, 
-                debt_penalty=debt_penalty, consumption_reward=consumption_reward,
-                show_weights=False)
-            print(i, f'Inventory module: final MAP={maps[-1]:0.4f}, best MAP={np.max(maps):0.4f}')
-            final_maps.append(maps[-1])
-        print(f'Inventory module: mean MAP={np.mean(final_maps):0.4f}, std MAP={np.std(final_maps):0.4f}')
-        
-        # no randomness, only need to run once
-        losses, maps, inv_m = predict_product_relations_with_inventory_module(
-                transactions, firms, products, prod2idx, prod_graph, init_weights=corr_m, 
-                debt_penalty=debt_penalty, consumption_reward=consumption_reward, 
-                show_weights=False)
-        print(f'Inventory module, init with corr: final MAP={maps[-1]:0.4f}, best MAP={np.max(maps):0.4f}')
-
-        
-if __name__ == "__main__":    
-    # summarize results with multiple runs
-    settings = ['all_transactions', '08_transactions', '05_transactions', '09_firms', '07_firms']
-    compare_methods_across_standard_data_settings(settings, debt_penalty=10, consumption_reward=1)
-    # gridsearch_on_hyperparameters()
