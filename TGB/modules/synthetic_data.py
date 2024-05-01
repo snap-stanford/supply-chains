@@ -25,31 +25,30 @@ def make_product_graph(num_exog=5, num_consumer=5, num_inner_layers=4, num_per_l
     """
     np.random.seed(seed)
     num_prods = num_exog + num_consumer + (num_inner_layers*num_per_layer)
-    prods = [f'product{i}' for i in range(num_prods)]
+    products = [f'product{i}' for i in range(num_prods)]
     prod_pos = np.random.random(size=(num_prods, 2))
     
     prod_graph = []
     start_idx = num_exog
-    prev_prods = prods[:num_exog]
+    prev_prods = products[:num_exog]
     prev_pos = prod_pos[:num_exog]
-    layers = [0] * num_exog
-    for l in range(num_inner_layers+1):
-        if l < num_inner_layers:
-            curr_prods = prods[start_idx:start_idx+num_per_layer]  # inner layer
+    layer2prods = {0:prev_prods}
+    for l in range(1, num_inner_layers+2):
+        if l < (num_inner_layers+1):
+            curr_prods = products[start_idx:start_idx+num_per_layer]  # inner layer
             curr_pos = prod_pos[start_idx:start_idx+num_per_layer]
         else:
-            curr_prods = prods[start_idx:]  # consumer prods
+            curr_prods = products[start_idx:]  # consumer products
             curr_pos = prod_pos[start_idx:]
+        layer2prods[l] = curr_prods
         
         dists = pairwise_distances(curr_pos, prev_pos)
-        utils = np.exp(-dists)
         for i, p in enumerate(curr_prods):
             num_inputs = np.random.randint(min_inputs, max_inputs+1)
             sorted_prev = np.argsort(dists[i])
             inputs = [prev_prods[j] for j in sorted_prev[:num_inputs]]  # use closest products as inputs
             units = np.random.randint(min_units, max_units+1, size=num_inputs)
-            prod_graph.extend(list(zip(inputs, [p] * num_inputs, units, [l+1] * num_inputs)))  # source, dest, units, layer
-            layers.append(l+1)
+            prod_graph.extend(list(zip(inputs, [p] * num_inputs, units, [l] * num_inputs)))  # source, dest, units, layer
             
         start_idx += num_per_layer
         prev_prods = curr_prods
@@ -59,37 +58,52 @@ def make_product_graph(num_exog=5, num_consumer=5, num_inner_layers=4, num_per_l
     print(f'Made product graph: {num_prods} products, {len(prod_graph)} part-product edges')
     consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input    
     print(f'{len(consumer_prods)} consumer products (ie, not inputs for anything)')
-    return prods, layers, prod_pos, prod_graph
+    return products, layer2prods, prod_pos, prod_graph
 
 
-def make_supplier_product_graph(max_firms, products, prod_pos, seed=0):
+def make_supplier_product_graph(products, layer2prods, prod_pos, seed=0, 
+                                num_layers_in_group=2, num_firms_per_group=20,
+                                min_num_suppliers=3, max_num_suppliers=6):
     """
     Assign products to supplier firms.
     """
     np.random.seed(seed)
-    firms = [f'firm{i}' for i in range(max_firms)]
-    firm_pos = np.random.random(size=(max_firms, 2))
-    dists = pairwise_distances(prod_pos, firm_pos)
-    utils = np.exp(-dists)
+    unique_layers = sorted(list(layer2prods.keys()))
+    layer2firms = {l:[] for l in unique_layers}  # maps layer -> firms that can supply products in that layer
+    firms = []
+    firm_idx = 0
+    for l in range(len(unique_layers)-num_layers_in_group+1):
+        group_firms = [f'firm{i}' for i in range(firm_idx, firm_idx+num_firms_per_group)]
+        firms += group_firms
+        for group_l in range(l, l+num_layers_in_group):  # layers allowed within the group
+            layer2firms[group_l] += group_firms
+        firm_idx += num_firms_per_group
+    print(f'Mapped layers to firms -> max {len(firms)} firms')
+    firm_pos = np.random.random(size=(len(firms), 2))
     
+    prod2idx = {p:i for i,p in enumerate(products)}
+    firm2idx = {f:i for i,f in enumerate(firms)}
     prod2firms = {}  # product to supplier firms
     firm2prods = {f:[] for f in firms}  # firm to products supplied
-    min_suppliers_per_prod = int(np.round(max_firms/100))
-    max_suppliers_per_prod = min_suppliers_per_prod*4
-    print(f'Num suppliers per product: {min_suppliers_per_prod}-{max_suppliers_per_prod}')
+    for l in unique_layers:
+        prods_l = layer2prods[l]
+        prod_idx = [prod2idx[p] for p in prods_l]
+        firms_l = layer2firms[l]
+        firm_idx = [firm2idx[f] for f in firms_l]
+        dists = pairwise_distances(prod_pos[prod_idx], firm_pos[firm_idx])
+        for i, p in enumerate(prods_l):
+            num_suppliers = np.random.randint(min_num_suppliers, max_num_suppliers+1)
+            sorted_firms = np.argsort(dists[i])
+            suppliers = [firms_l[j] for j in sorted_firms[:num_suppliers]]  # use closest firms as suppliers
+            prod2firms[p] = suppliers
+            for f in suppliers:
+                firm2prods[f].append(p)
 
-    for i, p in enumerate(products):
-        num_suppliers = np.random.randint(min_suppliers_per_prod, max_suppliers_per_prod+1)
-        sorted_firms = np.argsort(dists[i])
-        suppliers = [firms[j] for j in sorted_firms[:num_suppliers]]  # use closest firms as suppliers
-        prod2firms[p] = suppliers
-        for f in suppliers:
-            firm2prods[f].append(p)
     to_keep = [j for j,f in enumerate(firms) if len(firm2prods[f]) > 0]  # keep firms with at least one product
+    print(f'Keeping {len(to_keep)} out of {len(firms)} firms with at least one product')
     firms = list(np.array(firms)[to_keep])
     firm_pos = firm_pos[to_keep]
-    print(f'Keeping {len(firms)} out of {max_firms} firms with at least one product')
-    return firms, firm_pos, firm2prods, prod2firms
+    return firms, layer2firms, firm_pos, firm2prods, prod2firms
     
     
 def make_supplier_buyer_graph(firms, prod_graph, firm2prods, prod2firms, seed=0):
@@ -111,12 +125,14 @@ def make_supplier_buyer_graph(firms, prod_graph, firm2prods, prod2firms, seed=0)
     return inputs2supplier
     
     
-def generate_static_graphs(max_firms, seed=0):
+def generate_static_graphs(seed=0):
     """
     Generate static graphs: product-product, firm-product, firm-firm.
     """
-    products, layers, prod_pos, prod_graph = make_product_graph(seed=seed)
-    firms, firm_pos, firm2prods, prod2firms = make_supplier_product_graph(max_firms, products, prod_pos, seed=seed)    
+    products, layer2prods, prod_pos, prod_graph = make_product_graph(seed=seed)
+    # need to use distinct seed for generating firm pos; otherwise, some product pos and firm pos will be exactly the same
+    firms, layer2firms, firm_pos, firm2prods, prod2firms = make_supplier_product_graph(
+        products, layer2prods, prod_pos, seed=seed+1)    
     inputs2supplier = make_supplier_buyer_graph(firms, prod_graph, firm2prods, prod2firms, seed=seed)
     return firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier
     
