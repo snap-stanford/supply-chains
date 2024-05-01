@@ -10,12 +10,14 @@ class TGNPLInventory(torch.nn.Module):
         self,
         num_firms : int,
         num_prods : int,
-        debt_penalty : float = 10.0,
-        consumption_reward : float = 1.0,
+        debt_penalty : float = 5.,
+        consumption_reward : float = 4.,
+        adjust_penalty: float = 1.,
         device = None,
         learn_att_direct: bool = False,
         init_weights = None,
         emb_dim : int = 0,
+        seed: int = 0,
     ):
         super().__init__()
         if not learn_att_direct:
@@ -24,21 +26,25 @@ class TGNPLInventory(torch.nn.Module):
         self.num_prods = num_prods
         self.debt_penalty = debt_penalty
         self.consumption_reward = consumption_reward
+        self.adjust_penalty = adjust_penalty
         self.emb_dim = emb_dim
         self.learn_att_direct = learn_att_direct
         self.device = device
+        self.seed = seed
+        torch.manual_seed(seed)
             
         self.reset()
+        if init_weights is None:
+            init_weights = torch.rand(size=(self.num_prods, self.num_prods), requires_grad=True, device=device)
+        else:  # initial weights provided, eg, from correlations
+            assert init_weights.shape == (self.num_prods, self.num_prods)
+            init_weights = torch.Tensor(init_weights).to(device)
+        
         if self.learn_att_direct:  # learn attention weights directly  
-            if init_weights is None:
-                init_weights = torch.rand(size=(self.num_prods, self.num_prods), requires_grad=True, device=device)
-            else:  # initial weights provided, eg, from correlations
-                assert init_weights.shape == (self.num_prods, self.num_prods)
-                init_weights = torch.Tensor(init_weights).to(device)
             self.att_weights = Parameter(init_weights)
-        else:  # learn attention weights using product embeddings
-            assert init_weights is None
-            self.prod_bilinear = Parameter(torch.rand(size=(self.emb_dim, self.emb_dim), requires_grad=True, device=device))
+        else:  # learn attention weights using product embeddings, treat weights as adjustments
+            self.prod_bilinear = Parameter(torch.eye(self.emb_dim, requires_grad=True, device=device))
+            self.adjustments = Parameter(init_weights * 0.01)
                 
     
     def forward(self, src, dst, prod, raw_msg, prod_emb: Tensor = None):
@@ -91,18 +97,21 @@ class TGNPLInventory(torch.nn.Module):
         else:
             assert prod_emb is not None
             assert prod_emb.shape == (self.num_prods, self.emb_dim), prod_emb.shape
-            att_weights = prod_emb @ (self.prod_bilinear @ prod_emb.T)
+            att_weights = (prod_emb @ (self.prod_bilinear @ prod_emb.T)) + self.adjustments
+        att_weights = att_weights * (1-torch.eye(self.num_prods, device=self.device))  # set diagonal to 0
         return torch.nn.ReLU(inplace=False)(att_weights)  # weights must be non-negative
     
     def _compute_inventory_loss(self, inventory: Tensor, consumption: Tensor):
         """
         Compute loss on inventory and consumption. Want to maximize consumption while minimizing
-        wherever consumption is larger than inventory.
+        wherever consumption is larger than inventory. Also penalize adjustments if they are being used.
         """
         diff = torch.maximum(consumption - inventory, torch.zeros_like(inventory, device=self.device))  # entrywise max
         total_debt = torch.sum(diff, dim=-1)  # n_firms, sum of entries where consumption is greater than inventory
         total_consumption = torch.sum(consumption, dim=-1)  # n_firms
-        debt_loss = self.debt_penalty * total_debt
-        consump_rwd_loss = self.consumption_reward * total_consumption
+        debt_loss = (self.debt_penalty * total_debt).sum()
+        consump_rwd_loss = (self.consumption_reward * total_consumption).sum()
         loss = debt_loss - consump_rwd_loss
-        return loss.sum(), debt_loss.sum(), consump_rwd_loss.sum()
+        if not self.learn_att_direct:
+            loss += self.adjust_penalty * torch.sqrt(torch.sum(self.adjustments ** 2))
+        return loss, debt_loss, consump_rwd_loss
