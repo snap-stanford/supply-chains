@@ -352,7 +352,11 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
             rmse = torch.sqrt(criterion(y_amt_pred, target))  # RMSE
             total_perf_dict['amount_pred'] += float(rmse) * batch.num_events
         total_num_events += batch.num_events
-
+        
+        # Update inventory, ignore loss
+        if 'inventory' in model:  # will be in model if args.use_inventory = True
+            _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device, 
+                                               num_firms=num_firms, num_products=num_products)
         # Update memory and neighbor loader with ground-truth state.
         model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
         neighbor_loader.insert(batch.src, batch.dst, batch.prod)
@@ -397,7 +401,6 @@ def get_tgnpl_args():
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
     parser.add_argument('--inv_loss_weight', type=float, help='How much to weigh inventory loss; only used with use_inventory', default=0.1)
     parser.add_argument('--learn_att_direct', action='store_true', help='Whether to learn pairwise attention; only used with use_inventory')
-    paraser.add_argument('--inv_att_weights', type=str, help='Saved attention weights to initialize inventory module with')
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
     parser.add_argument('--seed', type=int, help='Random seed', default=1)
@@ -707,19 +710,22 @@ def run_experiment(args):
                 loss_dict = train(model, opt, neighbor_loader, data, val_loader, device, 
                     neg_sampler=neg_sampler, split_mode="val", use_prev_sampling=args.use_prev_sampling,
                     inv_loss_weight=args.inv_loss_weight)
-                model['memory'].reset_state()  # reset memory and graph for beginning of val
+                # reset memory/graph/inventory for beginning of val
+                model['memory'].reset_state()  
                 neighbor_loader.reset_state()
+                if args.use_inventory:
+                    model['inventory'].reset()
             elif args.train_with_fixed_samples:
                 # train on fixed negative samples instead of randomly drawn per epoch
                 dataset.load_train_ns()  # load train negative samples
                 loss_dict = train(model, opt, neighbor_loader, data, train_loader, device, 
                     neg_sampler=neg_sampler, split_mode="train", use_prev_sampling=args.use_prev_sampling,
                     inv_loss_weight=args.inv_loss_weight)
-                # Don't reset memory and graph since val is a continuation of train
+                # Don't reset since val is a continuation of train
             else:
                 loss_dict = train(model, opt, neighbor_loader, data, train_loader, device,
                                     inv_loss_weight=args.inv_loss_weight)
-                # Don't reset memory and graph since val is a continuation of train
+                # Don't reset since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             loss_str = ', '.join([f'{s}: {l:.4f}' for s,l in loss_dict.items()])
             print(f'Epoch: {epoch:02d}, {loss_str}; Training elapsed Time (s): {time_train:.4f}')
