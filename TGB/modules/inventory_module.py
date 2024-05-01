@@ -48,15 +48,15 @@ class TGNPLInventory(torch.nn.Module):
             self.adjustments = Parameter(init_weights * 0.01)
                 
     
-    def forward(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, raw_msg: Tensor, prod_emb: Tensor = None):
+    def forward(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, amt: Tensor, prod_emb: Tensor = None):
         """
         Main function: updates inventory based on new transactions and returns inventory loss.
         """
         unique_timesteps = sorted(torch.unique(t))
         inv_loss = 0
         debt_loss = 0
-        consump_rwd_loss = 0
-        att_weights = self._get_prod_attention(prod_emb)  # num_firms x num_products
+        consump_rwd = 0
+        att_weights = self._get_prod_attention(prod_emb)  # num_products x num_products
         for ts in unique_timesteps:
             if ts != self.curr_t:  # we've reached a new timestep
                 assert ts > self.curr_t, f'ts={ts}, curr_t={self.curr_t}'  # we should only move forward in time
@@ -65,18 +65,34 @@ class TGNPLInventory(torch.nn.Module):
                 self.curr_t = ts  # update current timestep
             
             in_ts = t == ts
-            total_supplied_t = self._compute_totals_per_firm_and_product(src[in_ts], prod[in_ts], raw_msg[in_ts])
+            total_supplied_t = self._compute_totals_per_firm_and_product(src[in_ts], prod[in_ts], amt[in_ts])
             total_consumed_t = total_supplied_t @ att_weights
-            inv_loss_t, debt_loss_t, consump_rwd_loss_t = self._compute_inventory_loss(self.inventory, total_consumed_t)
+            inv_loss_t, debt_loss_t, consump_rwd_t = self._compute_inventory_loss(self.inventory, total_consumed_t)
             inv_loss += inv_loss_t
             debt_loss += debt_loss_t
-            consump_rwd_loss += consump_rwd_loss_t
+            consump_rwd += consump_rwd_t
             self.inventory = torch.clip(self.inventory - total_consumed_t, 0, None)  # subtract consumption from inventory
             
-            total_bought_t = self._compute_totals_per_firm_and_product(dst[in_ts], prod[in_ts], raw_msg[in_ts])
+            total_bought_t = self._compute_totals_per_firm_and_product(dst[in_ts], prod[in_ts], amt[in_ts])
             self.received += total_bought_t  # add received products at t
 
-        return inv_loss / len(src), debt_loss / len(src), consump_rwd_loss / len(src)  # loss is scaled by batch size in tgnpl.py
+        return inv_loss / len(src), debt_loss / len(src), consump_rwd / len(src)  # loss is scaled by batch size in tgnpl.py
+    
+    
+    def link_pred_penalties(self, src: Tensor, prod: Tensor, prod_emb: Tensor = None):
+        """
+        Penalize transactions that would go into inventory debt.
+        """
+        att_weights = self._get_prod_attention(prod_emb)  # num_products x num_products
+        prod_ids = prod - self.num_firms
+        parts_per_prod = att_weights[prod_ids]  # parts needed to make one unit of product
+        assert parts_per_prod.shape == (len(prod), self.num_prods)
+        inventories = self.inventory[src]
+        assert inventories.shape == (len(src), self.num_prods)
+        diff = parts_per_prod - inventories          
+        penalties = torch.maximum(diff, torch.zeros_like(diff, device=self.device))  # wherever necessary consumption > inventory
+        return penalties.sum(axis=1)
+        
         
     def detach(self):
         """
@@ -104,7 +120,7 @@ class TGNPLInventory(torch.nn.Module):
         """
         self.received = torch.zeros(size=(self.num_firms, self.num_prods), requires_grad=False, device=self.device)
         
-    def _compute_totals_per_firm_and_product(self, firm_ids, prod_ids, raw_msg):
+    def _compute_totals_per_firm_and_product(self, firm_ids, prod_ids, amt):
         """
         Take vector of firm IDs and product IDs and return matrix of (n_firms x n_prod),
         indicating totals per pair. Used to get total supplied and total bought.
@@ -112,9 +128,11 @@ class TGNPLInventory(torch.nn.Module):
         assert (prod_ids >= self.num_firms).all()
         prod_ids = prod_ids - self.num_firms
         prod_onehot = F.one_hot(prod_ids, num_classes=self.num_prods)
-        amt = raw_msg[:, :1]  # assume first feature in raw_msg is amount
-        amt = torch.clip(amt, min=1)  # amt shouldn't be smaller than 1
-        prod_onehot = prod_onehot * amt  # scale each row by amt
+        neg_amt = (amt < 0).sum() / len(amt)
+        if neg_amt > 0.01:
+            print(f'Warning: {neg_amt:0.3f} of amt in batch is negative')
+        amt = torch.clip(amt, min=0)  # amt shouldn't be smaller than 0
+        prod_onehot = prod_onehot * amt.reshape(-1, 1)  # scale each row by amt
         totals = scatter(  # num_firms x num_products
             prod_onehot, firm_ids, dim=0, dim_size=self.num_firms, reduce="sum"
         )
@@ -140,10 +158,10 @@ class TGNPLInventory(torch.nn.Module):
         """
         diff = torch.maximum(consumption - inventory, torch.zeros_like(inventory, device=self.device))  # entrywise max
         total_debt = torch.sum(diff, dim=-1)  # n_firms, sum of entries where consumption is greater than inventory
+        debt_loss = (self.debt_penalty * total_debt).mean()  # mean over firms
         total_consumption = torch.sum(consumption, dim=-1)  # n_firms
-        debt_loss = (self.debt_penalty * total_debt).sum()
-        consump_rwd_loss = (self.consumption_reward * total_consumption).sum()
-        loss = debt_loss - consump_rwd_loss
+        consump_rwd = (self.consumption_reward * total_consumption).mean()  # mean over firms
+        loss = debt_loss - consump_rwd
         if not self.learn_att_direct:
             loss += self.adjust_penalty * torch.sqrt(torch.sum(self.adjustments ** 2))
-        return loss, debt_loss, consump_rwd_loss
+        return loss, debt_loss, consump_rwd

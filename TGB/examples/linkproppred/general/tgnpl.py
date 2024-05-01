@@ -147,8 +147,13 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         repeat_tensor(data.t, 2)[e_id].to(device),
         repeat_tensor(data.msg, 2)[e_id].to(device),
     )
-
     y_link_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
+    
+    if 'inventory' in model:
+        # use inventory module to penalize "impossible" transactions
+        assert model['inventory'].learn_att_direct, 'Inventory with product embs not implemented yet'
+        penalties = model['inventory'].link_pred_penalties(src, prod).reshape(-1, 1)
+        y_link_pred -= penalties
     y_link_pred = y_link_pred.reshape(bs, num_samples)
     
     if predict_amount:
@@ -163,37 +168,39 @@ def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devi
     """
     Update inventory per firm based on latest batch and compute losses.
     """
-    # use global variables when arguments are not specified
-    if num_firms is None:
-        num_firms = NUM_FIRMS
-    if num_products is None:
-        num_products = NUM_PRODUCTS
-    num_nodes = num_firms + num_products
-    # Helper vector to map global node indices to local ones
-    assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
+    if model['inventory'].learn_att_direct:
+        inv_loss, debt_loss, consump_rwd = model['inventory'](batch.src, batch.dst, batch.prod, batch.t, batch.amt)
+    else:
+        # get product embeddings
+        if num_firms is None:
+            num_firms = NUM_FIRMS
+        if num_products is None:
+            num_products = NUM_PRODUCTS
+        num_nodes = num_firms + num_products
+        # Helper vector to map global node indices to local ones
+        assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
+        f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
+        p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
+        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
+        assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
+        memory, last_update, update_loss = model['memory'](n_id)
+        z = model['gnn'](
+            memory,
+            last_update,
+            edge_index,
+            repeat_tensor(data.t, 2)[e_id].to(device),
+            repeat_tensor(data.msg, 2)[e_id].to(device),
+        )
+        prod_embs = z[assoc[p_id]]
+        inv_loss, debt_loss, consump_rwd = model['inventory'](batch.src, batch.dst, batch.prod, batch.t, 
+                                                                   batch.amt, prob_emb=prod_embs)
     
-    # get product embeddings
-    f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
-    p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
-    n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
-    assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
-    memory, last_update, update_loss = model['memory'](n_id)
-    z = model['gnn'](
-        memory,
-        last_update,
-        edge_index,
-        repeat_tensor(data.t, 2)[e_id].to(device),
-        repeat_tensor(data.msg, 2)[e_id].to(device),
-    )
-    prod_embs = z[assoc[p_id]]
-    inv_loss, debt_loss, consump_rwd_loss = model['inventory'](batch.src, batch.dst, batch.prod, batch.msg, prod_embs)
-    
-    return inv_loss, debt_loss, consump_rwd_loss
+    return inv_loss, debt_loss, consump_rwd
 
 
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
-          loss_name='ce-softmax', amt_loss_weight=1, update_params=True, 
-          ns_samples=6, neg_sampler=None, split_mode="val",
+          loss_name='ce-softmax', amt_loss_weight=1, inv_loss_weight=1, 
+          update_params=True, ns_samples=6, neg_sampler=None, split_mode="val",
           num_firms=None, num_products=None, use_prev_sampling=False):
     """
     Training procedure for TGN-PL model.
@@ -226,8 +233,10 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
 
     model['memory'].reset_state()  # Start with a fresh memory.
     neighbor_loader.reset_state()  # Start with an empty graph.
+    if 'inventory' in model:
+        model['inventory'].reset()
     
-    loss_types = ['loss', 'link_loss', 'amt_loss', 'inv_loss', 'debt_loss', 'consump_rwd_loss', 'update_loss']
+    loss_types = ['loss', 'link_loss', 'amt_loss', 'inv_loss', 'debt_loss', 'consump_rwd', 'update_loss']
     total_loss_dict = {l:0 for l in loss_types}
     total_num_events = 0
     for batch in tqdm(data_loader):        
@@ -260,18 +269,18 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             amt_loss = 0
         
         if 'inventory' in model:  # will be in model if args.use_inventory = True
-            inv_loss, debt_loss, consump_rwd_loss = _update_inventory_and_compute_loss(
+            inv_loss, debt_loss, consump_rwd = _update_inventory_and_compute_loss(
                 batch, model, neighbor_loader, data, device, num_firms=num_firms, num_products=num_products)
         else:
-            inv_loss, debt_loss, consump_rwd_loss = 0, 0, 0
+            inv_loss, debt_loss, consump_rwd = 0, 0, 0
         
-        loss = link_loss + amt_loss + inv_loss + update_loss
+        loss = link_loss + amt_loss + (inv_loss_weight*inv_loss) + update_loss
         total_loss_dict['loss'] += float(loss) * batch.num_events  # scale by batch size
         total_loss_dict['link_loss'] += float(link_loss) * batch.num_events
         total_loss_dict['amt_loss'] += float(amt_loss) * batch.num_events
-        total_loss_dict['inv_loss'] += float(inv_loss) * batch.num_events
-        total_loss_dict['debt_loss'] += float(debt_loss) * batch.num_events
-        total_loss_dict['consump_rwd_loss'] += float(consump_rwd_loss) * batch.num_events
+        total_loss_dict['inv_loss'] += inv_loss_weight * float(inv_loss) * batch.num_events
+        total_loss_dict['debt_loss'] += inv_loss_weight * float(debt_loss) * batch.num_events
+        total_loss_dict['consump_rwd'] += inv_loss_weight * float(consump_rwd) * batch.num_events
         total_loss_dict['update_loss'] += float(update_loss) * batch.num_events
         total_num_events += batch.num_events
         
@@ -374,24 +383,26 @@ def get_tgnpl_args():
     """
     parser = argparse.ArgumentParser('*** TGB ***')
     parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
-    # model parameters
+    # TGN model parameters
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
     parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
-    parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=1000)
-    parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=1000)
+    parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=100)
+    parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=100)
     parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
     parser.add_argument('--num_neighbors', type=int, help='Number of neighbors to store in NeighborLoader', default=10)
-    parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
-    parser.add_argument('--debt_penalty', type=float, help='Debt penalty weight for inventory loss; only used with use_inventory', default=10)
-    parser.add_argument('--consump_rwd', type=float, help='Consumption reward weight for inventory loss; only used with use_inventory', default=1)
     parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
     parser.add_argument('--weights', type=str, help='Saved weights to initialize model with')
     parser.add_argument('--skip_amount', action="store_true", help='If true, skip amount prediction')
+    # inventory module parameters
+    parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
+    parser.add_argument('--inv_loss_weight', type=float, help='How much to weigh inventory loss; only used with use_inventory', default=0.1)
+    parser.add_argument('--learn_att_direct', action='store_true', help='Whether to learn pairwise attention; only used with use_inventory')
+    paraser.add_argument('--inv_att_weights', type=str, help='Saved attention weights to initialize inventory module with')
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
     parser.add_argument('--seed', type=int, help='Random seed', default=1)
     parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
-    parser.add_argument('--bs', type=int, help='Batch size', default=200)
+    parser.add_argument('--bs', type=int, help='Batch size', default=100)
     parser.add_argument('--batch_by_t', action="store_true", help='Batch by t instead of fixed batch size; overrides --bs')
     parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
@@ -513,10 +524,9 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         inventory = TGNPLInventory(
             num_firms = num_firms,
             num_prods = num_products,
-            debt_penalty = args.debt_penalty,
-            consumption_reward = args.consump_rwd,
+            learn_att_direct = args.learn_att_direct,
             device = device,
-            emb_dim = link_emb,
+            emb_dim = emb_dim,
         ).to(device)
         model['inventory'] = inventory
         all_params = all_params | set(model['inventory'].parameters())
@@ -529,14 +539,17 @@ def set_up_data(args, data, dataset):
     """
     Normalize edge features; split data into train, val, test.
     """
-    # apply log scaling and standard scaling to edge features
+    raw_amts = torch.clone(data.msg[:, 0])
+    nan_count = torch.isnan(raw_amts).sum()
+    zero_count = len(raw_amts)-torch.count_nonzero(raw_amts)
+    print('Raw amounts: %.3f are nan, %.3f are 0' % (nan_count/len(raw_amts), zero_count/len(raw_amts)))
+    if args.use_inventory:
+        data.amt = raw_amts  # need to store raw amounts for inventory module
+    
+    # apply log scaling and standard scaling to edge features    
     for d in range(data.msg.shape[1]):
         vals = data.msg[:, d]
         assert (vals >= 0).all()  # if we are logging, all values need to be positive
-        if d == 0:  # amount is first dimension
-            nan_count = torch.isnan(vals).sum()
-            zero_count = len(vals)-torch.count_nonzero(vals)
-            print('Scaling amount: %.3f are nan, %.3f are 0' % (nan_count/len(vals), zero_count/len(vals)))
         min_val = torch.min(vals[vals > 0])  # minimum value greater than 0
         vals = torch.clip(vals, min_val, None)  # clip so we don't take log of 0
         vals = torch.log(vals)  # log scale
@@ -544,7 +557,7 @@ def set_up_data(args, data, dataset):
         std = torch.std(vals)
         vals = (vals - mean) / std  # standard scaling
         data.msg[:, d] = vals
-    
+        
     if args.num_train_days == -1:
         train_data = data[dataset.train_mask]
     else:
@@ -692,17 +705,20 @@ def run_experiment(args):
                 # used for debugging: train on validation, with fixed negative samples
                 dataset.load_val_ns()  # load val negative samples
                 loss_dict = train(model, opt, neighbor_loader, data, val_loader, device, 
-                    neg_sampler=neg_sampler, split_mode="val", use_prev_sampling=args.use_prev_sampling)
+                    neg_sampler=neg_sampler, split_mode="val", use_prev_sampling=args.use_prev_sampling,
+                    inv_loss_weight=args.inv_loss_weight)
                 model['memory'].reset_state()  # reset memory and graph for beginning of val
                 neighbor_loader.reset_state()
             elif args.train_with_fixed_samples:
                 # train on fixed negative samples instead of randomly drawn per epoch
                 dataset.load_train_ns()  # load train negative samples
                 loss_dict = train(model, opt, neighbor_loader, data, train_loader, device, 
-                    neg_sampler=neg_sampler, split_mode="train", use_prev_sampling=args.use_prev_sampling)
+                    neg_sampler=neg_sampler, split_mode="train", use_prev_sampling=args.use_prev_sampling,
+                    inv_loss_weight=args.inv_loss_weight)
                 # Don't reset memory and graph since val is a continuation of train
             else:
-                loss_dict = train(model, opt, neighbor_loader, data, train_loader, device)
+                loss_dict = train(model, opt, neighbor_loader, data, train_loader, device,
+                                    inv_loss_weight=args.inv_loss_weight)
                 # Don't reset memory and graph since val is a continuation of train
             time_train = timeit.default_timer() - start_epoch_train
             loss_str = ', '.join([f'{s}: {l:.4f}' for s,l in loss_dict.items()])
