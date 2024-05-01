@@ -29,6 +29,7 @@ class TGNPLInventory(torch.nn.Module):
         self.adjust_penalty = adjust_penalty
         self.emb_dim = emb_dim
         self.learn_att_direct = learn_att_direct
+
         self.device = device
         self.seed = seed
         torch.manual_seed(seed)
@@ -47,19 +48,36 @@ class TGNPLInventory(torch.nn.Module):
             self.adjustments = Parameter(init_weights * 0.01)
                 
     
-    def forward(self, src, dst, prod, raw_msg, prod_emb: Tensor = None):
+    def forward(self, src: Tensor, dst: Tensor, prod: Tensor, t: Tensor, raw_msg: Tensor, prod_emb: Tensor = None):
         """
         Main function: updates inventory based on new transactions and returns inventory loss.
         """
-        total_supplied = self._compute_totals_per_firm_and_product(src, prod, raw_msg)
-        att_weights = self._get_prod_attention(prod_emb)
-        total_consumed = total_supplied @ att_weights  # num_firms x num_products
-        assert self.inventory.shape == total_consumed.shape
-        inv_loss, debt_loss, consump_rwd_loss = self._compute_inventory_loss(self.inventory, total_consumed)
-        total_bought = self._compute_totals_per_firm_and_product(dst, prod, raw_msg)
-        self.inventory = torch.clip(self.inventory - total_consumed + total_bought, 0, None)
+        unique_timesteps = sorted(torch.unique(t))
+        inv_loss = 0
+        debt_loss = 0
+        consump_rwd_loss = 0
+        att_weights = self._get_prod_attention(prod_emb)  # num_firms x num_products
+        for ts in unique_timesteps:
+            if ts != self.curr_t:  # we've reached a new timestep
+                assert ts > self.curr_t, f'ts={ts}, curr_t={self.curr_t}'  # we should only move forward in time
+                self.inventory = self.inventory + self.received  # add received products from previous t to inventory
+                self.reset_received()  # set received products to 0
+                self.curr_t = ts  # update current timestep
+            
+            in_ts = t == ts
+            total_supplied_t = self._compute_totals_per_firm_and_product(src[in_ts], prod[in_ts], raw_msg[in_ts])
+            total_consumed_t = total_supplied_t @ att_weights
+            inv_loss_t, debt_loss_t, consump_rwd_loss_t = self._compute_inventory_loss(self.inventory, total_consumed_t)
+            inv_loss += inv_loss_t
+            debt_loss += debt_loss_t
+            consump_rwd_loss += consump_rwd_loss_t
+            self.inventory = torch.clip(self.inventory - total_consumed_t, 0, None)  # subtract consumption from inventory
+            
+            total_bought_t = self._compute_totals_per_firm_and_product(dst[in_ts], prod[in_ts], raw_msg[in_ts])
+            self.received += total_bought_t  # add received products at t
+
         return inv_loss / len(src), debt_loss / len(src), consump_rwd_loss / len(src)  # loss is scaled by batch size in tgnpl.py
-    
+        
     def detach(self):
         """
         Detaches inventory from gradient computation.
@@ -68,9 +86,23 @@ class TGNPLInventory(torch.nn.Module):
         
     def reset(self):
         """
+        Reset all time-varying parameters.
+        """
+        self.reset_inventory()
+        self.reset_received()
+        self.curr_t = -1
+        
+    def reset_inventory(self):
+        """
         Reset inventory for all firms.
         """
         self.inventory = torch.ones(size=(self.num_firms, self.num_prods), requires_grad=False, device=self.device)
+        
+    def reset_received(self):
+        """
+        Reset received for all firms.
+        """
+        self.received = torch.zeros(size=(self.num_firms, self.num_prods), requires_grad=False, device=self.device)
         
     def _compute_totals_per_firm_and_product(self, firm_ids, prod_ids, raw_msg):
         """
