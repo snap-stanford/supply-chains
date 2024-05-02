@@ -16,6 +16,7 @@ class TGNPLInventory(torch.nn.Module):
         device = None,
         learn_att_direct: bool = False,
         init_weights = None,
+        trainable: bool = True,
         emb_dim : int = 0,
         seed: int = 0,
     ):
@@ -33,6 +34,9 @@ class TGNPLInventory(torch.nn.Module):
         self.device = device
         self.seed = seed
         torch.manual_seed(seed)
+        self.trainable = trainable
+        if not self.trainable:
+            assert (init_weights is not None) and learn_att_direct
             
         self.reset()
         if init_weights is None:
@@ -42,7 +46,10 @@ class TGNPLInventory(torch.nn.Module):
             init_weights = torch.Tensor(init_weights).to(device)
         
         if self.learn_att_direct:  # learn attention weights directly  
-            self.att_weights = Parameter(init_weights)
+            if self.trainable:
+                self.att_weights = Parameter(init_weights)
+            else:
+                self.att_weights = init_weights  # no parameters to learn
         else:  # learn attention weights using product embeddings, treat weights as adjustments
             self.prod_bilinear = Parameter(torch.eye(self.emb_dim, requires_grad=True, device=device))
             self.adjustments = Parameter(init_weights * 0.01)
@@ -59,10 +66,7 @@ class TGNPLInventory(torch.nn.Module):
         att_weights = self._get_prod_attention(prod_emb)  # num_products x num_products
         for ts in unique_timesteps:
             if ts != self.curr_t:  # we've reached a new timestep
-                assert ts > self.curr_t, f'ts={ts}, curr_t={self.curr_t}'  # we should only move forward in time
-                self.inventory = self.inventory + self.received  # add received products from previous t to inventory
-                self.reset_received()  # set received products to 0
-                self.curr_t = ts  # update current timestep
+                self.update_to_new_timestep(ts)
             
             in_ts = t == ts
             total_supplied_t = self._compute_totals_per_firm_and_product(src[in_ts], prod[in_ts], amt[in_ts])
@@ -119,6 +123,17 @@ class TGNPLInventory(torch.nn.Module):
         Reset received for all firms.
         """
         self.received = torch.zeros(size=(self.num_firms, self.num_prods), requires_grad=False, device=self.device)
+        
+    def update_to_new_timestep(self, ts=None):
+        """
+        Add received to inventory and update curr_t.
+        """
+        if ts is None:
+            ts = self.curr_t + 1
+        assert ts > self.curr_t, f'ts={ts}, curr_t={self.curr_t}'  # we should only move forward in time
+        self.inventory = self.inventory + self.received  # add received products from previous t to inventory
+        self.reset_received()  # set received products to 0
+        self.curr_t = ts  # update current timestep
         
     def _compute_totals_per_firm_and_product(self, firm_ids, prod_ids, amt):
         """

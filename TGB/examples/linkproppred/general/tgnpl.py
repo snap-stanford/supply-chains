@@ -38,10 +38,10 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper, TimeSpecif
 # ===========================================
 # == Main functions to train and test model
 # ===========================================
-def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
-                          ns_samples=6, neg_sampler=None, split_mode="val",
-                          num_firms=None, num_products=None, use_prev_sampling=False,
-                          predict_amount=True):
+def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+                         ns_samples=6, neg_sampler=None, split_mode="val",
+                         num_firms=None, num_products=None, use_prev_sampling=False,
+                         predict_amount=True, include_inventory_penalty=True):
     """
     Get model scores for a batch's positive edges and its corresponding negative samples.
     If neg_sampler is None, sample negative samples at random.
@@ -149,10 +149,11 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     )
     y_link_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
     
-    if 'inventory' in model:
+    if 'inventory' in model and include_inventory_penalty:
         # use inventory module to penalize "impossible" transactions
         assert model['inventory'].learn_att_direct, 'Inventory with product embs not implemented yet'
         penalties = model['inventory'].link_pred_penalties(src, prod).reshape(-1, 1)
+        assert (penalties >= 0).all()
         y_link_pred -= penalties
     y_link_pred = y_link_pred.reshape(bs, num_samples)
     
@@ -163,7 +164,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     return y_link_pred, None, update_loss
     
     
-def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
+def update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                        num_firms=None, num_products=None):
     """
     Update inventory per firm based on latest batch and compute losses.
@@ -244,7 +245,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         if update_params:
             optimizer.zero_grad()
         
-        y_link_pred, y_amt_pred, update_loss = _get_y_pred_for_batch(
+        y_link_pred, y_amt_pred, update_loss = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, ns_samples=ns_samples, neg_sampler=neg_sampler, 
             split_mode=split_mode, num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling,
             predict_amount='amount_pred' in model)
@@ -269,12 +270,14 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             amt_loss = 0
         
         if 'inventory' in model:  # will be in model if args.use_inventory = True
-            inv_loss, debt_loss, consump_rwd = _update_inventory_and_compute_loss(
+            inv_loss, debt_loss, consump_rwd = update_inventory_and_compute_loss(
                 batch, model, neighbor_loader, data, device, num_firms=num_firms, num_products=num_products)
         else:
             inv_loss, debt_loss, consump_rwd = 0, 0, 0
         
-        loss = link_loss + amt_loss + (inv_loss_weight*inv_loss) + update_loss
+        loss = link_loss + amt_loss + update_loss
+        if 'inventory' in model and model['inventory'].trainable:
+            loss += (inv_loss_weight*inv_loss)
         total_loss_dict['loss'] += float(loss) * batch.num_events  # scale by batch size
         total_loss_dict['link_loss'] += float(link_loss) * batch.num_events
         total_loss_dict['amt_loss'] += float(amt_loss) * batch.num_events
@@ -333,7 +336,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     total_perf_dict = {'link_pred':0, 'amount_pred':0}
     total_num_events = 0
     for batch in tqdm(data_loader):
-        y_link_pred, y_amt_pred, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
+        y_link_pred, y_amt_pred, _ = get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products,
                                        use_prev_sampling=use_prev_sampling, 
@@ -355,8 +358,8 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         
         # Update inventory, ignore loss
         if 'inventory' in model:  # will be in model if args.use_inventory = True
-            _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device, 
-                                               num_firms=num_firms, num_products=num_products)
+            update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device, 
+                                              num_firms=num_firms, num_products=num_products)
         # Update memory and neighbor loader with ground-truth state.
         model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
         neighbor_loader.insert(batch.src, batch.dst, batch.prod)
@@ -399,8 +402,10 @@ def get_tgnpl_args():
     parser.add_argument('--skip_amount', action="store_true", help='If true, skip amount prediction')
     # inventory module parameters
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
-    parser.add_argument('--inv_loss_weight', type=float, help='How much to weigh inventory loss; only used with use_inventory', default=0.1)
+    parser.add_argument('--inv_loss_weight', type=float, help='How much to weigh inventory loss; only used with use_inventory', default=0.001)
     parser.add_argument('--learn_att_direct', action='store_true', help='Whether to learn pairwise attention; only used with use_inventory')
+    parser.add_argument('--att_weights', type=str, help='Saved attention weights for inventory module; only used with use_inventory')
+    parser.add_argument('--fix_inventory', action="store_true", help='Treat inventory module as fixed; don\'t update')
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
     parser.add_argument('--seed', type=int, help='Random seed', default=1)
@@ -524,12 +529,20 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     
     # add inventory module if required
     if args.use_inventory:
+        if args.att_weights is not None:
+            with open(args.att_weights, 'rb') as f:
+                att_weights = pickle.load(f)
+            print(f'Initializing inventory module with {args.att_weights} (trainable = {not args.fix_inventory})')
+        else:
+            att_weights = None
         inventory = TGNPLInventory(
             num_firms = num_firms,
             num_prods = num_products,
             learn_att_direct = args.learn_att_direct,
             device = device,
             emb_dim = emb_dim,
+            init_weights = att_weights,
+            trainable = not args.fix_inventory,
         ).to(device)
         model['inventory'] = inventory
         all_params = all_params | set(model['inventory'].parameters())
@@ -537,7 +550,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     optimizer = torch.optim.Adam(all_params,lr=args.lr)
     return model, optimizer
 
-  
+
 def set_up_data(args, data, dataset):
     """
     Normalize edge features; split data into train, val, test.
@@ -726,6 +739,8 @@ def run_experiment(args):
                 loss_dict = train(model, opt, neighbor_loader, data, train_loader, device,
                                     inv_loss_weight=args.inv_loss_weight)
                 # Don't reset since val is a continuation of train
+            if args.use_inventory:
+                model['inventory'].update_to_new_timestep()  # train ends at the end of t
             time_train = timeit.default_timer() - start_epoch_train
             loss_str = ', '.join([f'{s}: {l:.4f}' for s,l in loss_dict.items()])
             print(f'Epoch: {epoch:02d}, {loss_str}; Training elapsed Time (s): {time_train:.4f}')
@@ -736,6 +751,8 @@ def run_experiment(args):
             dataset.load_val_ns()  # load val negative samples
             val_dict = test(model, neighbor_loader, data, val_loader, neg_sampler, evaluator,
                                   device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling)
+            if args.use_inventory:
+                model['inventory'].update_to_new_timestep()  # val ends at the end of t
             time_val = timeit.default_timer() - start_val
             print(f"\tValidation {metric}: {val_dict['link_pred']:.4f}, RMSE: {val_dict['amount_pred']:.4f}")
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
