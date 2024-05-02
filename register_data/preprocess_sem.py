@@ -20,6 +20,7 @@ AGGREGATION_KEY = ["time_stamp","hs6","supplier_id","buyer_id"]
 def get_args():
     parser = argparse.ArgumentParser(description='Extracting hypergraph from the SEM dataset')
     parser.add_argument('--start_date', help='Starting day of form YY-MM-DD from which to collect data', default = "2019-01-01")
+    parser.add_argument('--end_date', help='Ending day of form YY-MM-DD from which to collect data', default = "2024-02-19")
     parser.add_argument('--length_timestamps', help='Number of days to aggregate per time stamp', default = 1, type = int)
     parser.add_argument('--sem_filepath', help='Path to the .csv file that contains the SEM supply-chain transactions', default = None)
     parser.add_argument('--out_filepath', help='Path to the .csv file for storing the resulting data', default = None)
@@ -63,8 +64,15 @@ def get_company_idname_map(df):
 
     return company_id2name_final
   
-def preprocess_sem(df, start_date = "2019-01-01", use_titles = True, id2company = None,
-                   length_timestamps = 1):
+def preprocess_sem(df, start_date = "2019-01-01", end_date = "2024-02-19", use_titles = True, id2company = None,
+                   length_timestamps = 1, date_format = '%Y-%m-%d'):
+    #select dates of interest
+    start_date_dt = datetime.datetime.strptime(start_date, date_format)
+    end_date_dt = datetime.datetime.strptime(end_date, date_format)
+    df_date_dt = pd.to_datetime(df.date)
+    df = df[(df_date_dt >= start_date_dt) & (df_date_dt <= end_date_dt)]
+    print("df has shape {} after selecting rows within {} and {} inclusive".format(df.shape, start_date, end_date))
+
     #deduplicate the SEM dataset according to the primary key
     df_sem = df[PRIMARY_KEY]
     df_sem = df_sem.drop_duplicates(subset = PRIMARY_KEY)
@@ -122,7 +130,7 @@ if __name__ == "__main__":
     print("After removing 7 negative amount_sum rows, there are {} raw entries\n".format(len(df)))
     
     map_id2company = get_company_idname_map(df)
-    df_sem = preprocess_sem(df, args.start_date, args.use_titles, map_id2company,
+    df_sem = preprocess_sem(df, args.start_date, args.end_date, args.use_titles, map_id2company,
                               length_timestamps = args.length_timestamps)
     df_sem.to_csv(args.out_filepath, index = False)
     
