@@ -96,14 +96,15 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
             src = torch.Tensor(transactions.supplier_id.values[to_keep]).long().to(device)
             dst = torch.Tensor(transactions.buyer_id.values[to_keep]).long().to(device)
             prod = torch.Tensor(transactions.product_id.values[to_keep]).long().to(device) + len(firms)
+            time = torch.Tensor(transactions.time.values[to_keep]).long().to(device)
             msg = torch.Tensor(transactions.amount.values[to_keep].reshape(-1, 1)).to(device)
             
             opt.zero_grad()
-            loss, debt_loss, cons_loss = module(src, dst, prod, msg, prod_emb=prod_emb)
+            loss, debt_loss, consump_rwd = module(src, dst, prod, time, msg, prod_emb=prod_emb)
             loss.backward(retain_graph=False)
             opt.step()
             module.detach()
-            losses.append((float(loss), float(debt_loss), float(cons_loss)))
+            losses.append((float(loss), float(debt_loss), float(consump_rwd)))
             
         weights = module._get_prod_attention(prod_emb=prod_emb).cpu().detach().numpy()
         mean_avg_pr = mean_average_precision(prod_graph, prod2idx, weights)

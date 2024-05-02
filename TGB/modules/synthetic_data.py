@@ -204,7 +204,7 @@ def generate_demand_schedule(num_timesteps, prod_graph, prod2firms, seed=0, min_
     
 
 def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, seed=0, 
-                                       default_supply=1e6, shock_supply=100, shock_prob=0.001, 
+                                       default_supply=1e6, shock_supply=1000, shock_prob=0.001, 
                                        shock_probs=None, recovery_rate=1.25):
     """
     Generate schedule of supply for exogenous products with possible shocks to supply.
