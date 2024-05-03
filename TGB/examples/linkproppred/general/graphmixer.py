@@ -81,7 +81,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     pos_src, pos_prod, pos_dst, pos_t, pos_msg = batch.src, batch.prod, batch.dst, batch.t, batch.msg
     bs = len(pos_src)  # batch size
     
-    print("batch size is", bs) # DEBUG
+    #print("batch size is", bs) # DEBUG
     
     if neg_sampler is None:
         # sample negatives        
@@ -143,7 +143,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     batch_t = pos_t.reshape(bs, 1).repeat(1, num_samples)
     src, dst, prod, t = batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten(), batch_t.flatten()  # row-wise flatten
     # Note: we don't call .unique() here over the batch, so we input the format (batch_size, ?)
-    print("src shape", src.shape)
+    #print("src shape", src.shape)
     batch_src_node_embeddings, batch_dst_node_embeddings, batch_prod_node_embeddings = \
                 model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
                                                                                 dst_node_ids=dst,
@@ -172,20 +172,20 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     y_link_pred = y_link_pred.reshape(bs, num_samples)
     update_loss = 0 # TODO: what's update loss for graphmixer? 
     
-    print("batch src node embedding shape", batch_src_node_embeddings.shape) # DEBUG
+    #print("batch src node embedding shape", batch_src_node_embeddings.shape) # DEBUG
     if predict_amount:
-        print("pos src shape", pos_src.shape)
+        #print("pos src shape", pos_src.shape)
         batch_pos_src_node_embeddings, batch_pos_dst_node_embeddings, batch_pos_prod_node_embeddings = \
                 model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=pos_src,
                                                                                 dst_node_ids=pos_dst,
                                                                                 prod_node_ids=pos_prod,
                                                                                 node_interact_times=pos_t,
                                                                                 neighbor_loader=neighbor_loader)
-        print("batch POS src node embedding shape", batch_pos_src_node_embeddings.shape) # DEBUG
+        #print("batch POS src node embedding shape", batch_pos_src_node_embeddings.shape) # DEBUG
         y_amt_pred = model['amount_pred'](batch_pos_src_node_embeddings, 
                                           batch_pos_dst_node_embeddings,
-                                          batch_pos_prod_node_embeddings).squeeze(dim=-1)
-        print("y_amt_pred SHAPE", y_amt_pred.shape) # DEBUG
+                                          batch_pos_prod_node_embeddings) #.squeeze(dim=-1)
+        #print("y_amt_pred SHAPE", y_amt_pred.shape) # DEBUG
         assert y_amt_pred.shape == (bs, 1)
         return y_link_pred, y_amt_pred, update_loss
     return y_link_pred, None, update_loss
@@ -423,6 +423,7 @@ def get_graphmixer_args():
     # model parameters
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
     parser.add_argument('--emb_name', type=str, help='Name of embedding module', default='attn', choices=['attn', 'sum', 'id'])
+    parser.add_argument('--node_features_dim', type=int, help='Node features dimension', default=10)
     parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=1000)
     parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=1000)
     parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
@@ -514,7 +515,12 @@ def set_up_model(args, data, device, num_firms=None, num_products=None, mimic_st
     num_nodes = num_firms + num_products
 
     # initialize graphmixer module
-    node_raw_features = torch.eye(num_nodes).to(device) # since node features is None here, one_hot encoding of node id
+    #node_raw_features = torch.eye(num_nodes).to(device) # since node features is None here, one_hot encoding of node id
+
+    #consider different initial node features for firms and products  
+    node_raw_features = torch.rand(num_nodes, args.node_features_dim).float().to(device)
+    node_raw_features[:num_firms, :] -= 1
+    
     edge_feat_dim = data.msg.shape[1]
     graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
                             time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, token_dim_expansion_factor=args.token_dim_expansion_factor, channel_dim_expansion_factor=args.channel_dim_expansion_factor, mimic_static_debug=mimic_static_debug).to(device) # TODO: delete debug flag
