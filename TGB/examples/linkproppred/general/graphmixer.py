@@ -78,7 +78,7 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     pos_src, pos_prod, pos_dst, pos_t, pos_msg = batch.src, batch.prod, batch.dst, batch.t, batch.msg
 
     bs = len(pos_src)  # batch size
-    
+        
     if neg_sampler is None:
         # sample negatives        
         neg_src = torch.randint(
@@ -166,7 +166,21 @@ def _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                 batch_prod_node_embeddings).squeeze(dim=-1)
     y_pred = y_pred.reshape(bs, num_samples)
     update_loss = 0 # TODO: what's update loss for graphmixer? 
-    return y_pred, update_loss
+    
+    if predict_amount:
+        batch_pos_src_node_embeddings, batch_pos_dst_node_embeddings, batch_pos_prod_node_embeddings = \
+                model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=pos_src,
+                                                                                dst_node_ids=pos_dst,
+                                                                                prod_node_ids=pos_prod,
+                                                                                node_interact_times=pos_t,
+                                                                                neighbor_loader=neighbor_loader)
+        y_amt_pred = model['amount_pred'](batch_pos_src_node_embeddings, 
+                                          batch_pos_dst_node_embeddings,
+                                          batch_pos_prod_node_embeddings).squeeze(dim=-1)
+        y_amt_pred = y_amt_pred.reshape(bs, 1) # since only 1 positive sample
+        assert y_amt_pred.shape == (bs, 1)
+        return y_link_pred, y_amt_pred, update_loss
+    return y_link_pred, None, update_loss
     
 def _update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
                                        num_firms=None, num_products=None):
@@ -324,7 +338,8 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         y_pred, _ = _get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                                        neg_sampler=neg_sampler, split_mode=split_mode,
                                        num_firms=num_firms, num_products=num_products,
-                                       use_prev_sampling=use_prev_sampling)
+                                       use_prev_sampling=use_prev_sampling,
+                                       predict_amount='amount_pred' in model)
         input_dict = {
             "y_pred_pos": y_pred[:, :1],
             "y_pred_neg": y_pred[:, 1:],
