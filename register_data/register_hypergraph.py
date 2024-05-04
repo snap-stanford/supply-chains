@@ -310,6 +310,10 @@ if __name__ == "__main__":
         df.to_csv(edgelist_fn, index = False)  # save edgelist
     global NUM_FIRMS; global NUM_PRODS
     num_nodes, NUM_FIRMS, NUM_PRODS = len(id2entity), product_min_id, len(id2entity) - product_min_id
+    max_idx = NUM_FIRMS * NUM_FIRMS * NUM_PRODS
+    print('Max possible single index for triplets:', max_idx)
+    if max_idx > np.iinfo(np.int64).max:
+        raise Exception('Max index is larger than max np.int64')
     
     timestamps = sorted(list(df["ts"]))
     train_max_ts = np.percentile(timestamps, 70).astype(int)
@@ -325,7 +329,7 @@ if __name__ == "__main__":
     for (s,d,p), ct in E_train_counter.most_common():
         E_train_edge_idx.append(convert_triplet_to_index(s, d, p))
         E_train_counts.append(ct)
-    E_train_edge_idx = np.array(E_train_edge_idx)
+    E_train_edge_idx = np.array(E_train_edge_idx, dtype=np.int64)  # set type to make sure we don't overflow
     E_train_counts = np.array(E_train_counts)
     
     #create pool of node targets (firm & products) to be randomly selected during training 
@@ -333,7 +337,7 @@ if __name__ == "__main__":
     num_samples = args.num_samples
     L_firm = list(range(0, product_min_id))
     L_products = list(range(product_min_id, len(id2entity)))
-    print(len(L_firm), len(L_products))
+    print(f'Num firms: {len(L_firm)}, num products: {len(L_products)}')
 
     if (args.use_prev_sampling == False):
         E_train_edges = [(s,d,p,t) for t in E_train for s,d,p in E_train[t]]
