@@ -96,7 +96,25 @@ class TGNPLInventory(torch.nn.Module):
         diff = parts_per_prod - inventories          
         penalties = torch.maximum(diff, torch.zeros_like(diff, device=self.device))  # wherever necessary consumption > inventory
         return penalties.sum(axis=1)
-        
+    
+    def amount_caps(self, src: Tensor, prod: Tensor, prod_emb: Tensor = None):
+        """
+        Compute maximum amount that supplier firm (src) could make of product (prod).
+        """
+        att_weights = self._get_prod_attention(prod_emb)  # num_products x num_products
+        prod_ids = prod - self.num_firms
+        parts_per_prod = att_weights[prod_ids]  # parts needed to make one unit of product
+        assert parts_per_prod.shape == (len(prod), self.num_prods)
+        inventories = self.inventory[src]
+        assert inventories.shape == (len(src), self.num_prods)
+        max_amt = inventories / torch.clip(parts_per_prod, 1e-5, None)  # so we don't divide by 0
+        max_val = torch.max(max_amt)
+        ispart = parts_per_prod > 0
+        max_amt[~ispart] = max_val  # set to max val so it doesn't affect min
+        caps, _ = torch.min(max_amt, dim=1)
+        num_parts = (parts_per_prod > 0).sum(axis=1)  # has no parts, exogenous
+        caps[num_parts == 0] = -1
+        return caps
         
     def detach(self):
         """
