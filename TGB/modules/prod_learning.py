@@ -12,92 +12,72 @@ from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import pairwise_distances
 import torch
 
-from inventory_module import TGNPLInventory
+from inventory_module import TGNPLInventory, mean_average_precision
 from synthetic_data import *
 
 
-def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=False, return_per_prod=False):
-    """
-    Compute mean average precision over products, given a prediction matrix where rows are products
-    and columns are their predicted inputs.
-    """
-    exog_prods = set(prod_graph.source.values) - set(prod_graph.dest.values)  # exogenous products, has no inputs
-    consumer_prods = set(prod_graph.dest.values) - set(prod_graph.source.values)  # consumer products, not used as input, never shows up in transactions
-    exclude = exog_prods.union(consumer_prods)
-    if verbose:
-        print(f'Excluding {len(exog_prods)} exog and {len(consumer_prods)} consumer prods, no transactions')
-    prod2ap = {}
-    for p, p_idx in prod2idx.items():
-        if p not in exclude:
-            inputs = [prod2idx[s] for s in prod_graph[prod_graph['dest'] == p].source.values]  # true inputs
-            assert len(inputs) > 0
-            ranking = list(np.argsort(-pred_mat[p_idx]))
-            total = 0
-            for s_idx in inputs:
-                k = ranking.index(s_idx)+1  # get the rank of input s_idx; rank and index are off-by-one
-                prec_at_k = np.mean(np.isin(ranking[:k], inputs))  # how many of top k are true inputs
-                total += prec_at_k
-            avg_prec = total/len(inputs)
-            if verbose:
-                print(f'{p} (consumer prod: {is_consumer_prod}): avg precision={avg_prec:0.4f}')
-            prod2ap[p] = avg_prec
-    if return_per_prod:
-        return prod2ap
-    return np.mean(list(prod2ap.values()))
-
-
-def predict_product_relations_with_corr(transactions, products):
+def predict_product_relations_with_corr(transactions, prod2idx, min_nonzero=5, products_to_test=None,
+                                        verbose=False):
     """
     Create matrix of predicted relationships between products based on temporal correlation.
     """
-    min_t = np.min(transactions.time.values)
-    max_t = np.max(transactions.time.values)
-    m = np.zeros((len(products), len(products)))
-    for p_idx in range(len(products)):
-        prod_txns = transactions[transactions['product_id'] == p_idx]  
-        if len(prod_txns) > 0:  # should be 0 for consumer products
+    assert np.isin(['ts', 'source', 'target', 'product', 'weight'], transactions.columns).all()
+    if products_to_test is None:
+        products_to_test = prod2idx.keys()
+    min_t = np.min(transactions.ts.values)
+    max_t = np.max(transactions.ts.values)
+    m = np.zeros((len(prod2idx), len(prod2idx)))
+    for prod in products_to_test:
+        p_idx = prod2idx[prod]
+        prod_txns = transactions[transactions['product'] == p_idx]  
+        if verbose:
+            print(prod, f'-> found {len(prod_txns)} transactions')
+        if len(prod_txns) > 0:
             candidates = {}
-            for s_idx, supp_df in prod_txns.groupby('supplier_id'):  # iterate through suppliers
-                supp_ts = convert_txns_to_timeseries(supp_df, min_t, max_t)
-                buy_df = transactions[transactions['buyer_id'] == s_idx]  # all txns where s is buying
-                for b_idx, buy_df_s in buy_df.groupby('product_id'):  # group by products bought
-                    buy_ts = convert_txns_to_timeseries(buy_df_s, min_t, max_t)
-                    best_corr, best_lag = get_best_corr_with_lag(buy_ts, supp_ts)
-                    candidates[b_idx] = candidates.get(b_idx, []) + [best_corr]
+            for s_idx, supp_df in prod_txns.groupby('source'):  # iterate through suppliers
+                supp_ts = convert_txns_to_timeseries(supp_df, min_t, max_t, time_col='ts', amount_col='weight')
+                if (supp_ts > 0).sum() >= min_nonzero:  # has at least min_nonzero nonzero weights
+                    buy_df = transactions[transactions['target'] == s_idx]  # all txns where s is buying
+                    for b_idx, buy_df_s in buy_df.groupby('product'):  # group by products bought
+                        buy_ts = convert_txns_to_timeseries(buy_df_s, min_t, max_t, time_col='ts', amount_col='weight')
+                        if (buy_ts > 0).sum() >= min_nonzero:
+                            best_corr, best_lag = get_best_corr_with_lag(buy_ts, supp_ts)
+                            candidates[b_idx] = candidates.get(b_idx, []) + [best_corr]
             for b_idx, corrs in candidates.items():
                 m[p_idx, b_idx] = np.mean(corrs)
     return m
 
 
 def predict_product_relations_with_inventory_module(transactions, firms, products, prod2idx, prod_graph, 
-                                                    module_args, num_epochs=100, patience=5, show_weights=True,
-                                                    prod_emb=None):
+                                                    module_args, num_epochs=100, show_weights=True,
+                                                    prod_emb=None, gpu=0):
     """
-    Train inventory module with direct attention on synthetic data, return final attention weights.
+    Train inventory module on transactions, return final attention weights.
     """
+    assert np.isin(['ts', 'source', 'target', 'product', 'weight'], transactions.columns).all()
     # initialize inventory module
-    device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
     module_args['device'] = device
     module = TGNPLInventory(**module_args)                
     opt = torch.optim.Adam(module.parameters())
     if prod_emb is not None:
-        assert not module_args['learn_att_direct']
+        assert not module.learn_att_direct
         prod_emb = torch.Tensor(prod_emb).to(device)
-        assert module_args['emb_dim'] == prod_emb.shape[1]
+        assert module.emb_dim == prod_emb.shape[1]
     
     # train inventory module
     losses = []
     maps = []
-    min_t = transactions.time.min()
-    max_t = transactions.time.max()
+    min_t = np.min(transactions.ts.values)
+    max_t = np.max(transactions.ts.values)
     for ep in range(num_epochs):
         for t in range(min_t, max_t+1):
-            to_keep = transactions.time.values == t
-            src = torch.Tensor(transactions.supplier_id.values[to_keep]).long().to(device)
-            dst = torch.Tensor(transactions.buyer_id.values[to_keep]).long().to(device)
-            prod = torch.Tensor(transactions.product_id.values[to_keep]).long().to(device) + len(firms)
-            time = torch.Tensor(transactions.time.values[to_keep]).long().to(device)
-            msg = torch.Tensor(transactions.amount.values[to_keep].reshape(-1, 1)).to(device)
+            to_keep = transactions.ts.values == t
+            src = torch.Tensor(transactions['source'].values[to_keep]).long().to(device)
+            dst = torch.Tensor(transactions['target'].values[to_keep]).long().to(device)
+            prod = torch.Tensor(transactions['product'].values[to_keep]).long().to(device) + len(firms)
+            time = torch.Tensor(transactions['ts'].values[to_keep]).long().to(device)
+            msg = torch.Tensor(transactions['weight'].values[to_keep].reshape(-1, 1)).to(device)
             
             opt.zero_grad()
             loss, debt_loss, consump_rwd = module(src, dst, prod, time, msg, prod_emb=prod_emb)
@@ -119,20 +99,74 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
     return losses, maps, weights, module
 
 
+def test_inventory_module_on_sem_data():
+    """
+    Test inventory module on SEM.
+    """
+    data_dir = '/lfs/local/0/serinac/supply-chains/TGB/tgb/datasets/tgbl_hypergraph_sem_22_23'
+    data_name = 'tgbl-hypergraph_sem_22_23'
+    
+    with open(os.path.join(data_dir, f'{data_name}_meta.json'), "r") as f:
+        metadata = json.load(f)
+    num_nodes = len(metadata["id2entity"])  
+    num_firms = metadata["product_threshold"]
+    num_products = num_nodes - num_firms
+    # create necessary mappings
+    firms = []
+    firm2idx = {}
+    products = []
+    prod2idx = {}
+    for idx in range(num_nodes):
+        entity = metadata['id2entity'][str(idx)]
+        if idx < num_firms:
+            firms.append(entity)
+            firm2idx[entity] = idx
+        else:
+            idx -= num_firms
+            products.append(entity)
+            prod2idx[entity] = idx
+    
+    # load transactions
+    transactions = pd.read_csv(os.path.join(data_dir, f'{data_name}_edgelist.csv'))
+    assert (transactions.ts.values == sorted(transactions.ts.values)).all()
+    transactions['product'] = transactions['product']-num_firms
+    train_max_ts = transactions.ts.quantile(0.7).astype(int)
+    train_transactions = transactions[transactions.ts <= train_max_ts]
+    print(f'Num txns: {len(transactions)}, num train: {len(train_transactions)}')  # should match tgnpl experiments
+    
+    # make prod_graph
+    sem_codes = [901210, 902780, 903141, 903180]
+    all_parts = []
+    for code in sem_codes:
+        parts = pd.read_csv(os.path.join(data_dir, f'{code}_parts.csv'))
+        print(f'{code} -> num parts={len(parts)}')
+        parts = parts.rename(columns={'prod_hs6':'dest', 'part_hs6':'source'})
+        all_parts.append(parts[['source', 'dest', 'description']])
+    prod_graph = pd.concat(all_parts)
+
+    module_args = {'num_firms': num_firms, 'num_prods': num_products, 'learn_att_direct': True}
+    inv_m = predict_product_relations_with_inventory_module(
+        train_transactions, firms, products, prod2idx, prod_graph, module_args, show_weights=True)
+    return inv_m
+    
+
 def train_node2vec_on_product_firm_graph(transactions, firms, products, out_file, emb_dim=64):
     """
     Train inventory module with direct attention on synthetic data, return final attention weights.
     """
+    assert np.isin(['ts', 'source', 'target', 'product', 'weight'], transactions.columns).all()
     # make firm-product graph
     G = nx.Graph()
-    supp_prod = transactions.groupby(['supplier_id', 'product_id'])['amount'].sum().reset_index()
-    supp_prod['supplier'] = supp_prod.supplier_id.apply(lambda x: firms[x])
-    supp_prod['product'] = supp_prod.product_id.apply(lambda x: products[x])
-    G.add_weighted_edges_from(zip(supp_prod['supplier'].values, supp_prod['product'].values, supp_prod['amount'].values))
-    buy_prod = transactions.groupby(['buyer_id', 'product_id'])['amount'].sum().reset_index()
-    buy_prod['buyer'] = buy_prod.buyer_id.apply(lambda x: firms[x])
-    buy_prod['product'] = buy_prod.product_id.apply(lambda x: products[x])
-    G.add_weighted_edges_from(zip(buy_prod['buyer'].values, buy_prod['product'].values, buy_prod['amount'].values))
+    supp_prod = transactions.groupby(['source', 'product'])['weight'].sum().reset_index()
+    supp_prod['supplier_name'] = supp_prod['source'].apply(lambda x: firms[x])
+    supp_prod['product_name'] = supp_prod['product'].apply(lambda x: products[x])
+    G.add_weighted_edges_from(zip(supp_prod['supplier_name'].values, supp_prod['product_name'].values, 
+                                  supp_prod['weight'].values))
+    buy_prod = transactions.groupby(['target', 'product'])['weight'].sum().reset_index()
+    buy_prod['buyer_name'] = buy_prod['target'].apply(lambda x: firms[x])
+    buy_prod['product_name'] = buy_prod['product'].apply(lambda x: products[x])
+    G.add_weighted_edges_from(zip(buy_prod['buyer_name'].values, buy_prod['product_name'].values, 
+                                  buy_prod['weight'].values))
     print(f'Constructed graph, found {len(G)} out of {len(firms)+len(products)} nodes')
     
     n2v = Node2Vec(G, dimensions=emb_dim, walk_length=30, num_walks=200, workers=4)
@@ -281,9 +315,10 @@ def compare_methods_on_dataset(dataset_name, try_corr=True, emb_name=None, save_
         
 if __name__ == "__main__":    
     # gridsearch_on_hyperparameters()
-    datasets = ['synthetic_standard.csv', 'supply_shocks.csv', 'missing_20_pct_firms.csv']
-    embs = ['prod_embs_synthetic_std.pkl', 'prod_embs_synthetic_shocks.pkl', 'prod_embs_synthetic_missing.pkl']
-    for d, e in zip(datasets, embs):
-        print(f'===== {d} =====')
-        compare_methods_on_dataset(d, emb_name=e, save_results=True, num_seeds=10)
-        print()
+#     datasets = ['synthetic_standard.csv', 'supply_shocks.csv', 'missing_20_pct_firms.csv']
+#     embs = ['prod_embs_synthetic_std.pkl', 'prod_embs_synthetic_shocks.pkl', 'prod_embs_synthetic_missing.pkl']
+#     for d, e in zip(datasets, embs):
+#         print(f'===== {d} =====')
+#         compare_methods_on_dataset(d, emb_name=e, save_results=True, num_seeds=10)
+#         print()
+    test_inventory_module_on_sem_data()

@@ -300,6 +300,7 @@ def generate_transactions(num_timesteps, inventories, curr_orders, exog_supp,  #
             
             transactions_df = pd.DataFrame(transactions_t, columns=['supplier_id', 'buyer_id', 'product_id', 'amount'])
             transactions_df['time'] = t
+            transactions_df = transactions_df.sample(replace=False, frac=1.0, random_state=seed)  # shuffle within t
             all_transactions.append(transactions_df)
         
         # make new orders based on inputs needed, inventories, and pending
@@ -506,18 +507,18 @@ def get_stats_on_firm_network(inputs2supplier):
     print(f'Average clustering coef: {c: 0.3f}')
     
 
-def convert_txns_to_timeseries(txns_df, min_t, max_t):
+def convert_txns_to_timeseries(txns_df, min_t, max_t, time_col='time', amount_col='amount'):
     """
     Convert a dataframe of transactions to a time series.
     """
-    sums_per_t = txns_df.groupby('time')['amount'].sum()
+    sums_per_t = txns_df.groupby(time_col)[amount_col].sum()
     ts = []
     for t in range(min_t, max_t+1):
         if t in sums_per_t.index:
             ts.append(sums_per_t.loc[t])
         else:
             ts.append(0)
-    return ts
+    return np.array(ts)
 
 def get_temporal_corr(buy_ts, supp_ts, lag=0, corr_func=pearsonr):
     """

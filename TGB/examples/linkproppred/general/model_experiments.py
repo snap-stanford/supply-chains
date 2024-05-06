@@ -31,7 +31,7 @@ from modules.msg_func import TGNPLMessage
 from modules.msg_agg import MeanAggregator
 from modules.neighbor_loader import LastNeighborLoaderTGNPL
 from modules.memory_module import TGNPLMemory, StaticMemory
-from modules.inventory_module import TGNPLInventory
+from modules.inventory_module import TGNPLInventory, mean_average_precision
 from modules.early_stopping import  EarlyStopMonitor
 from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper, TimeSpecificDataLoader
 
@@ -151,7 +151,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                 repeat_tensor(data.msg, 2)[e_id].to(device),
             )
         elif MODEL_NAME == 'GRAPHMIXER':
-            # TODO - need to set z
+            # TODO - get embeddings for nodes involved in the computation
             pass
         y_link_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]]).reshape(bs, num_samples)
         if 'amount_pred' in model:
@@ -164,17 +164,20 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
     if 'inventory' in model and include_inventory:
         assert (batch.t >= model['inventory'].curr_t).all()
         to_skip = batch.t > model['inventory'].curr_t  # inventory module can't help with future timesteps
+        if model['inventory'].learn_att_direct:
+            penalties = model['inventory'].link_pred_penalties(src, prod).reshape(bs, num_samples)
+            caps = model['inventory'].amount_caps(pos_src, pos_prod)
+        else:  # need product embeddings
+            prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
+            penalties = model['inventory'].link_pred_penalties(src, prod, prod_emb=prod_embs).reshape(bs, num_samples)
+            caps = model['inventory'].amount_caps(pos_src, pos_prod, prod_emb=prod_embs)
         
         # use inventory module to penalize "impossible" transactions
-        assert model['inventory'].learn_att_direct, 'Inventory with product embs not implemented yet'
-        penalties = model['inventory'].link_pred_penalties(src, prod).reshape(bs, num_samples)
         assert (penalties >= 0).all()
         keep_pred = (~to_skip).int().reshape(-1, 1)
         penalties = keep_pred * penalties  # set to 0 wherever t > curr_t
         
         # use inventory module to cap maximum amount possible
-        assert model['inventory'].learn_att_direct, 'Inventory with product embs not implemented yet'
-        caps = model['inventory'].amount_caps(pos_src, pos_prod)
         # we use -1 to indicate products without parts; can't compute cap
         neg_ones = torch.full(caps.shape, -1, dtype=caps.dtype).to(device)
         no_parts = torch.isclose(caps, neg_ones)  
@@ -215,12 +218,24 @@ def update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devic
         if num_products is None:
             num_products = NUM_PRODUCTS
         num_nodes = num_firms + num_products
-        # Helper vector to map global node indices to local ones
-        assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
-        f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
-        p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
-        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
-        assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
+        prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
+        inv_loss, debt_loss, consump_rwd = model['inventory'](batch.src, batch.dst, batch.prod, batch.t, 
+                                                              batch.amt, prod_emb=prod_embs)
+    return inv_loss, debt_loss, consump_rwd
+
+
+def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device):
+    """
+    Helper function to get current embeddings for all products.
+    """
+    assert MODEL_NAME in {'TGNPL', 'GRAPHMIXER'}
+    # Helper vector to map global node indices to local ones
+    assoc = torch.empty(num_firms+num_products, dtype=torch.long, device=device)
+    f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
+    p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
+    n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
+    assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
+    if MODEL_NAME == 'TGNPL':
         memory, last_update, update_loss = model['memory'](n_id)
         z = model['gnn'](
             memory,
@@ -230,11 +245,12 @@ def update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devic
             repeat_tensor(data.msg, 2)[e_id].to(device),
         )
         prod_embs = z[assoc[p_id]]
-        inv_loss, debt_loss, consump_rwd = model['inventory'](batch.src, batch.dst, batch.prod, batch.t, 
-                                                              batch.amt, prob_emb=prod_embs)
-    return inv_loss, debt_loss, consump_rwd
+    else:
+        # TODO - get product embeddings for GraphMixer
+        pass
+    return prod_embs
 
-
+    
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', amt_loss_weight=1, inv_loss_weight=1, 
           update_params=True, ns_samples=6, neg_sampler=None, split_mode="val",
@@ -453,6 +469,7 @@ def parse_args():
     parser.add_argument('--learn_att_direct', action='store_true', help='Whether to learn pairwise attention')
     parser.add_argument('--att_weights', type=str, help='Saved attention weights for inventory module')
     parser.add_argument('--fix_inventory', action="store_true", help='Treat inventory module as fixed, don\'t update')
+    parser.add_argument('--prod_graph', type=str, default='synthetic_prod_graph.pkl')
     
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
@@ -485,19 +502,12 @@ def parse_args():
 
 def get_unique_id_for_experiment(args):
     """
-    Returns a unique ID for an experiment that encodes all of its args.
+    Returns a unique ID for an experiment.
     """
     curr_time = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
-    id_elements = []
-    for arg in vars(args):  # iterate over Namespace
-        if arg == 'weights':
-            pass   # drop weight argument; otherwise, ID gets too long
-        elif arg == 'model':
-            id_elements.append(str(getattr(args, arg)).upper())
-        else:
-            id_elements.append(str(getattr(args, arg)))
-    id_elements.append(curr_time)
-    return '_'.join(id_elements)
+    # include important parameters + time
+    exp_id = f'{args.model.upper()}_{args.dataset}_{args.use_inventory}_{curr_time}'
+    return exp_id
 
 def do_hyperparameter_sweep(fixed_args, dims=None, batch_sizes=None, gpus=None):
     """
@@ -728,7 +738,6 @@ def run_experiment(args):
         os.mkdir(results_dir)
         print('INFO: Create directory {}'.format(results_dir))
     Path(results_dir).mkdir(parents=True, exist_ok=True)
-    results_filename = f'{results_dir}/{exp_id}_results.json'
     
     save_model_dir = f'{osp.dirname(osp.abspath(__file__))}/saved_models/'
     if not osp.exists(save_model_dir):
@@ -773,6 +782,15 @@ def run_experiment(args):
             print('Success: matched all model modules and loaded weights')
         except:
             raise Exception('Failed to initialize model with weights')
+            
+    # Load ground-truth production functions, if they are provided
+    if 'inventory' in model and args.prod_graph is not None:
+        with open(args.prod_graph, 'rb') as f:
+            prod_graph, products = pickle.load(f)
+            prod2idx = {p:i for i,p in enumerate(products)}
+        assert len(products) == NUM_PRODUCTS
+    else:
+        prod_graph = None
     
     # Initialize neighbor loader
     neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=args.num_neighbors, device=device)
@@ -787,11 +805,11 @@ def run_experiment(args):
         # set the seed for deterministic results...
         torch.manual_seed(run_idx + args.seed)
         set_random_seed(run_idx + args.seed)
-        # define an early stopper
+        results_filename = f'{results_dir}/{exp_id}_{run_idx}_results.json'
         save_model_id = f'{exp_id}_{run_idx}'
         early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
-                                                         tolerance=args.tolerance, patience=args.patience,
-                                                         ignore_patience_num_epoch=args.ignore_patience_num_epoch)
+                                         tolerance=args.tolerance, patience=args.patience,
+                                         ignore_patience_num_epoch=args.ignore_patience_num_epoch)
 
         # ==================================================== Train & Validation
         train_loss_list = []
@@ -840,12 +858,21 @@ def run_experiment(args):
                             device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling)
             if 'inventory' in model:
                 model['inventory'].update_to_new_timestep()  # val ends at the end of t
-            time_val = timeit.default_timer() - start_val
             print(f"\tValidation {metric}: {val_dict['link_pred']:.4f}, RMSE: {val_dict['amount_pred']:.4f}")
-            print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
             val_link_perf_list.append(val_dict['link_pred'])
             val_amt_perf_list.append(val_dict['amount_pred'])
-            
+                
+            if prod_graph is not None:  # this means model has inventory AND production functions were provided
+                if model['inventory'].learn_att_direct:
+                    pred_mat = model['inventory']._get_prod_attention().cpu().detach().numpy()
+                else:
+                    prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
+                    pred_mat = model['inventory']._get_prod_attention(prod_emb=prod_embs).cpu().detach().numpy()
+                prod_map = mean_average_precision(prod_graph, prod2idx, pred_mat)
+                print(f'\tProduction function MAP: {prod_map:.4f}')
+        
+            time_val = timeit.default_timer() - start_val
+            print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
             # log metrics to tensorboard and wandb
             log_dict = loss_dict.copy()
             log_dict[f'val_link_pred_{metric}'] = val_dict['link_pred']
@@ -857,7 +884,7 @@ def run_experiment(args):
                     writer.add_scalar(k, v, epoch)            
             if args.wandb:
                 wandb.log(log_dict)
-                
+            
             if args.test_per_epoch:  # evaluate on test per epoch - used for debugging
                 start_test = timeit.default_timer()
                 dataset.load_test_ns()  # load test negative samples
@@ -876,9 +903,9 @@ def run_experiment(args):
                   'seed': args.seed,
                   'train loss': train_loss_list,
                   f'val {metric}': val_link_perf_list,
-                  f'val RMSE': val_amt_perf_list,
+                  'val RMSE': val_amt_perf_list,
                   f'test {metric}': test_link_perf_list,
-                  f'test RMSE': test_amt_perf_list}, 
+                  'test RMSE': test_amt_perf_list}, 
                   results_filename, replace_file=True)
 
             # check if best on val so far, save if so, stop if no improvement observed for a while

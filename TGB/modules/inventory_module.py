@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import Tensor
 from torch.nn import Parameter
@@ -198,3 +199,40 @@ class TGNPLInventory(torch.nn.Module):
         if not self.learn_att_direct:
             loss += self.adjust_penalty * torch.sqrt(torch.sum(self.adjustments ** 2))
         return loss, debt_loss, consump_rwd
+    
+
+def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=False, return_per_prod=False, 
+                           products_to_test=None):
+    """
+    Compute mean average precision over products, given a prediction matrix where rows are products
+    and columns are their predicted inputs.
+    """
+    if products_to_test is None:
+        # can only test on products that appear as dest in prod_graph
+        # leave out products that never appear as source in prod_graph since those are consumer products
+        # and we don't observe firm-firm transactions for them
+        products_to_test = set(prod_graph.dest.values).intersection(set(prod_graph.source.values))
+    if verbose:
+        print(f'Computing MAP over {len(products_to_test)} products')
+    prod2ap = {}
+    for p in products_to_test:
+        parts = prod_graph[prod_graph['dest'] == p].source.values
+        inputs = [prod2idx[s] for s in parts if s in prod2idx]  # idx of true inputs
+        if verbose:
+            print(f'Found {len(inputs)} out of {len(parts)} parts for {p}')
+        if len(inputs) == 0:
+            print(f'Warning: found none of the true inputs for {p}, skipping')
+        else:
+            ranking = list(np.argsort(-pred_mat[prod2idx[p]]))
+            total = 0
+            for s_idx in inputs:
+                k = ranking.index(s_idx)+1  # get the rank of input s_idx; rank and index are off-by-one
+                prec_at_k = np.mean(np.isin(ranking[:k], inputs))  # how many of top k are true inputs
+                total += prec_at_k
+            avg_prec = total/len(inputs)
+            if verbose:
+                print(f'{p}: avg precision={avg_prec:0.4f}')
+            prod2ap[p] = avg_prec
+    if return_per_prod:
+        return prod2ap
+    return np.mean(list(prod2ap.values()))
