@@ -16,6 +16,7 @@ import numpy as np
 #global variables 
 PRIMARY_KEY = ["date","supplier_id", "buyer_id","hs_code","quantity_sum","weight_sum","amount_sum", "bill_count"]
 AGGREGATION_KEY = ["time_stamp","hs6","supplier_id","buyer_id"]
+SEM_CODES = [901210, 902780, 903141]
 
 def get_args():
     parser = argparse.ArgumentParser(description='Extracting hypergraph from the SEM dataset')
@@ -25,6 +26,7 @@ def get_args():
     parser.add_argument('--sem_filepath', help='Path to the .csv file that contains the SEM supply-chain transactions', default = None)
     parser.add_argument('--out_filepath', help='Path to the .csv file for storing the resulting data', default = None)
     parser.add_argument('--use_titles', help = 'if provided, data uses company titles instead of IDs', action='store_true')
+    parser.add_argument('--only_sem_suppliers', help = 'if provided, only keep transactions involving SEM suppliers', action='store_true')
     args = parser.parse_args()
     return args
 
@@ -55,7 +57,7 @@ def get_company_idname_map(df):
     company_id2name = add_to_dictionary(company_id2name, supplier_info)
     company_id2name = add_to_dictionary(company_id2name, buyer_info)
     
-    #pre-process to get the firm name that appears the most frequently for each form ID
+    #pre-process to get the firm name that appears the most frequently for each firm ID
     company_id2name_final = {}
     for i, firm_id in enumerate(company_id2name):
         title_counts = company_id2name[firm_id]
@@ -65,7 +67,7 @@ def get_company_idname_map(df):
     return company_id2name_final
   
 def preprocess_sem(df, start_date = "2019-01-01", end_date = "2024-02-19", use_titles = True, id2company = None,
-                   length_timestamps = 1, date_format = '%Y-%m-%d'):
+                   length_timestamps = 1, date_format = '%Y-%m-%d', only_sem_suppliers=False):
     #select dates of interest
     start_date_dt = datetime.datetime.strptime(start_date, date_format)
     end_date_dt = datetime.datetime.strptime(end_date, date_format)
@@ -91,9 +93,10 @@ def preprocess_sem(df, start_date = "2019-01-01", end_date = "2024-02-19", use_t
                                                   "amount_sum": "total_amount"})
     # df_sem_agg = df_sem_agg.drop(columns = ["price"])
     df_sem_agg = df_sem_agg.sort_values(by = ["time_stamp"], ascending = True)
+    print(f'Aggregated by {AGGREGATION_KEY} -> {len(df_sem_agg)} rows')
     
     #replace the company hashed IDs to the company names if requested 
-    if (use_titles == True):
+    if use_titles:
         company_ids = list(id2company.keys())
         df_companies = pd.DataFrame.from_dict({"company_id": company_ids,
                                        "company_t": [id2company[id] for id in company_ids]})
@@ -116,6 +119,20 @@ def preprocess_sem(df, start_date = "2019-01-01", end_date = "2024-02-19", use_t
         df_sem_agg = df_sem_agg[["time_stamp","supplier_id","buyer_id","hs6","bill_count",
                                     "total_quantity","total_amount","total_weight"]]
     
+    # only keep transactions where SEM suppliers are supplying/buying
+    if only_sem_suppliers:
+        str_sem_codes = [str(c) for c in SEM_CODES]
+        sem_txns = df_sem_agg[df_sem_agg.hs6.isin(str_sem_codes)]
+        if use_titles:
+            suppliers = sem_txns['supplier_t'].unique()  # find all SEM suppliers
+            to_keep = df_sem_agg['supplier_t'].isin(suppliers) | df_sem_agg['buyer_t'].isin(suppliers)
+        else:
+            suppliers = sem_txns['supplier_id'].unique()  # find all SEM suppliers
+            to_keep = df_sem_agg['supplier_id'].isin(suppliers) | df_sem_agg['buyer_id'].isin(suppliers)
+        print(f'Found {len(sem_txns)} SEM transactions and {len(suppliers)} unique suppliers')
+        df_sem_agg = df_sem_agg[to_keep]
+        print(f'Only keeping transactions involving SEM suppliers -> {len(df_sem_agg)} rows left')
+    
     return df_sem_agg
 
 
@@ -125,13 +142,13 @@ if __name__ == "__main__":
     df = pd.read_csv(args.sem_filepath)
     print("Loaded in {} raw entries from the SEM dataset at {}!\n...".format(len(df), args.sem_filepath))
 
-    # Extra preprocess to deal with 7 negative amount_sum rows: they exist in data provider source
+    # Extra preprocess to deal with negative amount_sum rows: they exist in data provider source
     df = df[df.amount_sum >= 0]
-    print("After removing 7 negative amount_sum rows, there are {} raw entries\n".format(len(df)))
+    print("After removing negative amount_sum rows, there are {} raw entries\n".format(len(df)))
     
     map_id2company = get_company_idname_map(df)
     df_sem = preprocess_sem(df, args.start_date, args.end_date, args.use_titles, map_id2company,
-                              length_timestamps = args.length_timestamps)
+                              length_timestamps = args.length_timestamps, only_sem_suppliers=args.only_sem_suppliers)
     df_sem.to_csv(args.out_filepath, index = False)
     
     print("Saved out {} transactions to {}!".format(len(df_sem), args.out_filepath))
