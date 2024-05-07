@@ -16,9 +16,9 @@ import time
 from inventory_module import TGNPLInventory, mean_average_precision
 from synthetic_data import *
 
+PATH_TO_DATASETS = f'/lfs/local/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
+SEM_DATA_NAME = 'tgbl-hypergraph_sem_23_subset'
 SEM_CODES = [901210, 902780, 903141] # , 903180]
-SEM_DATA_DIR = '/lfs/local/0/serinac/supply-chains/TGB/tgb/datasets/tgbl_hypergraph_sem_22_23'
-SEM_DATA_NAME = 'tgbl-hypergraph_sem_22_23'
 
 def predict_product_relations_with_corr(transactions, prod2idx, min_nonzero=5, products_to_test=None,
                                         verbose=False):
@@ -52,6 +52,30 @@ def predict_product_relations_with_corr(transactions, prod2idx, min_nonzero=5, p
     return m
 
 
+def predict_product_relations_with_pmi(transactions, firms, prod2idx, products_to_test=None, verbose=False):
+    """
+    Create matrix of predicted relationships between products based on Pointwise Mutual Information (PMI).
+    """
+    assert np.isin(['ts', 'source', 'target', 'product', 'weight'], transactions.columns).all()
+    if products_to_test is None:
+        products_to_test = prod2idx.keys()
+    prob_supply = transactions.groupby('product')['source'].nunique() / len(firms)  # prob that a firm supplies each product
+    prob_buy = transactions.groupby('product')['target'].nunique() / len(firms)  # prob that a firm buys each product
+    m = np.zeros((len(prod2idx), len(prod2idx)))
+    for prod in products_to_test:
+        p_idx = prod2idx[prod]
+        prod_txns = transactions[transactions['product'] == p_idx]  
+        if verbose:
+            print(f'{prod} (id: {prod2idx[prod]}) -> found {len(prod_txns)} transactions')
+        suppliers = prod_txns['source'].unique()  # suppliers of this product
+        buy_df = transactions[transactions['target'].isin(suppliers)]
+        for b_idx, buy_df_b in buy_df.groupby('product'):
+            prob_buy_b_supply_p = buy_df_b['target'].nunique() / len(firms)  # prob that a firm buys b and supplies p
+            pmi = prob_buy_b_supply_p / (prob_buy[b_idx] * prob_supply[p_idx])
+            m[p_idx, b_idx] = np.log(pmi)
+    return m
+        
+
 def predict_product_relations_with_inventory_module(transactions, firms, products, prod2idx, prod_graph, 
                                                     module_args, num_epochs=100, show_weights=True,
                                                     prod_emb=None, gpu=0, products_to_test=None, patience=5):
@@ -72,8 +96,7 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
     # train inventory module
     losses = []
     maps = []
-    min_t = np.min(transactions.ts.values)
-    max_t = np.max(transactions.ts.values)
+    timesteps = transactions.ts.unique()
     no_improvement = 0
     if products_to_test is not None and len(products_to_test) < 10:
         return_per_prod = True
@@ -82,7 +105,7 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
     for ep in range(num_epochs):
         start_time = time.time()
         loss, debt_loss, consump_rwd = 0, 0, 0
-        for t in range(min_t, max_t+1):
+        for t in timesteps:
             to_keep = transactions.ts.values == t
             src = torch.Tensor(transactions['source'].values[to_keep]).long().to(device)
             dst = torch.Tensor(transactions['target'].values[to_keep]).long().to(device)
@@ -99,11 +122,15 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
             debt_loss += float(debt_loss)
             consump_rwd += float(consump_rwd)
         module.reset()  # reset inventory
-        if loss >= np.min(losses):
-            no_improvement += 1
-        losses.append(loss)
+        losses.append(float(loss))
             
         weights = module._get_prod_attention(prod_emb=prod_emb).cpu().detach().numpy()
+        if show_weights and (ep % 5) == 0:
+            pos = plt.imshow(weights)
+            plt.colorbar(pos)
+            plt.title(f'Ep {ep}')
+            plt.show()
+            
         avg_prec = mean_average_precision(prod_graph, prod2idx, weights, 
                         products_to_test=products_to_test, return_per_prod=return_per_prod)
         duration = time.time()-start_time
@@ -115,16 +142,15 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
         else:
             mean_avg_prec = avg_prec
             print(f'Ep {ep}: MAP={mean_avg_prec:0.4f}, loss={loss:0.4f}, debt_loss={debt_loss:0.4f}, consump_rwd={consump_rwd:0.4f} [time={duration:0.2f}s]')
+        if len(maps) > 0:
+            if mean_avg_prec > np.max(maps):  # new best
+                no_improvement = 0
+            else: 
+                no_improvement += 1
         maps.append(mean_avg_prec)
         
-        if show_weights and (ep % 5) == 0:
-            pos = plt.imshow(weights)
-            plt.colorbar(pos)
-            plt.title(f'Ep {ep}')
-            plt.show()
-        
         if no_improvement > patience:
-            print(f'Early stopping since loss did not improve for {patience} epochs')
+            print(f'Early stopping since MAP did not improve for {patience} epochs')
             break
     return losses, maps, weights, module
     
@@ -223,10 +249,8 @@ def gridsearch_on_hyperparameters(num_seeds=1):
         print(f'Scaling={scaling}: MAP mean={np.mean(maps):.4f}, std={np.std(maps):.4f}')
 
 
-def compare_methods_on_synthetic_data(dataset_name, try_corr=True, emb_name=None, save_results=False, num_seeds=1):
+def prep_synthetic_data_for_prod_learning(name):
     """
-    Evaluate production learning methods on standard synthetic data with different settings:
-    varying amounts of missingness in transactions, varying amounts of missingness in firms.
     """
     with open('./synthetic_data.pkl', 'rb') as f:
         firms, products, prod_graph, firm2prods, prod2firms, inputs2supplier = pickle.load(f)
@@ -240,6 +264,13 @@ def compare_methods_on_synthetic_data(dataset_name, try_corr=True, emb_name=None
     print(f'Num transactions: overall={len(transactions)}, train={len(train_transactions)}')  # should match tgnpl experiments
     print(f'Running inventory module, random init, experiments with {num_seeds} seeds')
 
+    
+def compare_methods_on_synthetic_data(data_dir, dataset_name, try_corr=True, emb_name=None, save_results=False, 
+                                      num_seeds=1):
+    """
+    Evaluate production learning methods on synthetic data.
+    """
+    
     module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True}
     mats, maps = test_inventory_module_for_multiple_seeds(num_seeds, train_transactions, firms, products, prod2idx, 
                                                          prod_graph, module_args)
@@ -296,16 +327,17 @@ def load_SEM_data():
     """
     Load SEM data.
     """
+    data_dir = os.path.join(PATH_TO_DATASETS, SEM_DATA_NAME.replace('-', '_'))
     # make prod_graph
     all_parts = []
     for code in SEM_CODES:
-        parts = pd.read_csv(os.path.join(SEM_DATA_DIR, f'{code}_parts.csv'))
+        parts = pd.read_csv(os.path.join(data_dir, f'{code}_parts.csv'))
         print(f'{code} -> num parts={len(parts)}')
         parts = parts.rename(columns={'prod_hs6':'dest', 'part_hs6':'source'})
         all_parts.append(parts[['source', 'dest', 'description']])
     prod_graph = pd.concat(all_parts)
     
-    with open(os.path.join(SEM_DATA_DIR, f'{SEM_DATA_NAME}_meta.json'), "r") as f:
+    with open(os.path.join(data_dir, f'{SEM_DATA_NAME}_meta.json'), "r") as f:
         metadata = json.load(f)
     num_nodes = len(metadata["id2entity"])  
     num_firms = metadata["product_threshold"]
@@ -326,7 +358,7 @@ def load_SEM_data():
             prod2idx[entity] = idx
     
     # load transactions
-    transactions = pd.read_csv(os.path.join(SEM_DATA_DIR, f'{SEM_DATA_NAME}_edgelist.csv'))
+    transactions = pd.read_csv(os.path.join(data_dir, f'{SEM_DATA_NAME}_edgelist.csv'))
     assert (transactions.ts.values == sorted(transactions.ts.values)).all()
     transactions['product'] = transactions['product']-num_firms
     train_max_ts = transactions.ts.quantile(0.7).astype(int)
@@ -336,85 +368,80 @@ def load_SEM_data():
     return train_transactions, firms, firm2idx, products, prod2idx, prod_graph
     
     
-def prep_SEM_data_for_prod_learning():
+def compare_methods_on_sem_data(methods=[]):
     """
-    Preprocess SEM data for inventory module or correlation experiments. Load data + subset it.
+    Run method for learning production functions on SEM data.
     """
-    train_transactions, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
-    # find all transactions that would affect correlations or inventory module
-    sem_idx = [prod2idx[p] for p in SEM_CODES]
-    suppliers = train_transactions[train_transactions['product'].isin(sem_idx)].source.values
-    print(f'Found {len(suppliers)} suppliers of SEM')
-    to_keep = (train_transactions['source'].isin(suppliers)) | (train_transactions['target'].isin(suppliers))
-    train_transactions = train_transactions[to_keep]
-    print(f'Keeping {len(train_transactions)} directly related transactions')
-    
-    # reindex
-    found_idx = sorted(set(train_transactions['source'].unique()).union(set(train_transactions['target'].unique())))
-    old2new = {old:new for new,old in enumerate(found_idx)}
-    train_transactions['source'] = train_transactions['source'].apply(lambda x: old2new[x])
-    train_transactions['target'] = train_transactions['target'].apply(lambda x: old2new[x])
-    new_firms = [firms[idx] for idx in found_idx]
-    new_firm2idx = {f:i for i,f in enumerate(new_firms)}
-    for f in new_firms:
-        assert new_firm2idx[f] == old2new[firm2idx[f]]
-    
-    found_idx = sorted(set(train_transactions['product'].unique()))
-    old2new = {old:new for new,old in enumerate(found_idx)}
-    train_transactions['product'] = train_transactions['product'].apply(lambda x: old2new[x])
-    new_products = [products[idx] for idx in found_idx]
-    new_prod2idx = {p:i for i,p in enumerate(new_products)}
-    for p in new_products:
-        assert new_prod2idx[p] == old2new[prod2idx[p]]
-    print(f'Original data: {len(firms)} firms, {len(products)} products; kept data: {len(new_firms)} firms, {len(new_products)} products')
-    return train_transactions, new_firms, new_firm2idx, new_products, new_prod2idx, prod_graph
-    
-    
-def compare_methods_on_sem_data(method='inventory'):
-    assert method in ['random', 'corr', 'inventory', 'inventory-corr']
-    if method == 'random':
-        _, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
-    else:
-        transactions, firms, firm2idx, products, prod2idx, prod_graph = prep_SEM_data_for_prod_learning()
-    
-    if method == 'random':
-        maps = {p:[] for p in SEM_CODES}
-        print(f'Testing random matrices of size ({len(products)}, {len(products)})')
+    for m in methods:
+        assert m in ['random', 'corr', 'pmi', 'inventory', 'inventory-corr']
+    transactions, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
+    if 'random' in methods:
+        avg_precs = {p:[] for p in SEM_CODES}
+        avg_precs['mean'] = []
+        print(f'\nTesting random matrices of size ({len(products)}, {len(products)})')
         for i in range(100):
             np.random.seed(i)
             rand_mat = np.random.random((len(products), len(products)))
             rand_map = mean_average_precision(prod_graph, prod2idx, rand_mat, products_to_test=SEM_CODES, 
                                               return_per_prod=True)
             for p in SEM_CODES:
-                maps[p].append(rand_map[p])
-        print(f'Random baseline')
+                avg_precs[p].append(rand_map[p])
+            avg_precs['mean'].append(np.mean(list(rand_map.values())))
+        maps = avg_precs['mean']
+        print(f'MAP: mean={np.mean(maps):0.4f}, std={np.std(maps):0.4f}')
         for p in SEM_CODES:
-            p_maps = maps[p]
-            print(f'{p} -> mean MAP={np.mean(p_maps):0.4f}, std={np.std(p_maps):0.4f}')
-    elif method == 'corr':  # get correlations for all pairs of products
+            p_avg_precs = avg_precs[p]
+            print(f'{p} -> mean AP={np.mean(p_avg_precs):0.4f}, std={np.std(p_avg_precs):0.4f}')
+    
+    if 'corr' in methods:  # get correlations for all pairs of products
         start_time = time.time()
-        corr_m = predict_product_relations_with_corr(transactions, prod2idx, verbose=True)
+        print('\nPredicting production functions with temporal correlations...')
+        corr_m = predict_product_relations_with_corr(transactions, prod2idx, products_to_test=SEM_CODES, verbose=True)
         with open('corr_sem.pkl', 'wb') as f:
             pickle.dump(corr_m, f)
         duration = time.time()-start_time
         print(f'Finished computing all correlations: time={duration:0.2f}s')
         corr_map = mean_average_precision(prod_graph, prod2idx, corr_m, products_to_test=SEM_CODES, return_per_prod=True)
-        print(f'Temporal correlations')
+        print(f'MAP: {np.mean(list(corr_map.values())):0.4f}')
         for p in SEM_CODES:
-            print(f'{p} -> MAP={corr_map[p]:0.4f}')
-    elif method == 'inventory':
+            print(f'{p} -> AP={corr_map[p]:0.4f}')
+            
+    if 'pmi' in methods:
+        print('\nPredicting production functions with PMI...')
+        pmi_m = predict_product_relations_with_pmi(transactions, firms, prod2idx, products_to_test=SEM_CODES,
+                                       verbose=True)
+        pmi_map = mean_average_precision(prod_graph, prod2idx, pmi_m, products_to_test=SEM_CODES, return_per_prod=True)
+        print(f'MAP: {np.mean(list(pmi_map.values())):0.4f}')
+        for p in SEM_CODES:
+            print(f'{p} -> AP={pmi_map[p]:0.4f}')
+            
+    if 'node2vec' in methods:
+        assert os.path.isfile('node2vec_sem.pkl')
+        print('\nPredicting production functions with node2vec...')
+        node2vec_m = predict_product_relations_with_node2vec('node2vec_sem.pkl', products)
+        node2vec_map = mean_average_precision(prod_graph, prod2idx, node2vec_m, products_to_test=SEM_CODES, 
+                                              return_per_prod=True)
+        print(f'MAP: {np.mean(list(node2vec_map.values())):0.4f}')
+        for p in SEM_CODES:
+            print(f'{p} -> AP={node2vec_map[p]:0.4f}')
+    
+    if 'inventory' in methods:
+        print('\nPredicting production functions with inventory module, direct attention, random init...')
         module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True}
         losses, maps, weights, module = predict_product_relations_with_inventory_module(
             transactions, firms, products, prod2idx, prod_graph, module_args, show_weights=False,
-            products_to_test=SEM_CODES, num_epochs=1000)
+            products_to_test=SEM_CODES)
         with open('inv_sem_direct.pkl', 'wb') as f:
             pickle.dump((losses, maps, weights), f)
-    elif method == 'inventory-corr':
+    
+    if 'inventory-corr' in methods:
         assert os.path.isfile('corr_sem.pkl')
         with open('corr_sem.pkl', 'rb') as f:
             corr_m = pickle.load(f)
+        print('\nLoaded corr matrix from corr_sem.pkl')
+        print('Predicting production functions with inventory module, direct attention, initialized by correlations...')
         module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True,
-                       'init_weights': corr_m}
+                       'init_weights': corr_m, 'debt_penalty':5, 'consumption_reward':5}
         losses, maps, weights, module = predict_product_relations_with_inventory_module(
             transactions, firms, products, prod2idx, prod_graph, module_args, show_weights=False,
             products_to_test=SEM_CODES)
@@ -430,5 +457,5 @@ if __name__ == "__main__":
 #         print(f'===== {d} =====')
 #         compare_methods_on_synthetic_data(d, emb_name=e, save_results=True, num_seeds=10)
 #         print()
-    compare_methods_on_sem_data(method='inventory')   
+    compare_methods_on_sem_data(methods=['corr', 'pmi', 'node2vec'])   
     
