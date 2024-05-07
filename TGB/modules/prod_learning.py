@@ -2,7 +2,7 @@ from collections import Counter
 import json
 import matplotlib.pyplot as plt
 import networkx as nx
-from node2vec import Node2Vec
+# from node2vec import Node2Vec
 import numpy as np
 import os
 import pandas as pd
@@ -11,10 +11,14 @@ from scipy.sparse import csr_matrix
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import pairwise_distances
 import torch
+import time
 
 from inventory_module import TGNPLInventory, mean_average_precision
 from synthetic_data import *
 
+SEM_CODES = [901210, 902780, 903141] # , 903180]
+SEM_DATA_DIR = '/lfs/local/0/serinac/supply-chains/TGB/tgb/datasets/tgbl_hypergraph_sem_22_23'
+SEM_DATA_NAME = 'tgbl-hypergraph_sem_22_23'
 
 def predict_product_relations_with_corr(transactions, prod2idx, min_nonzero=5, products_to_test=None,
                                         verbose=False):
@@ -31,12 +35,12 @@ def predict_product_relations_with_corr(transactions, prod2idx, min_nonzero=5, p
         p_idx = prod2idx[prod]
         prod_txns = transactions[transactions['product'] == p_idx]  
         if verbose:
-            print(prod, f'-> found {len(prod_txns)} transactions')
-        if len(prod_txns) > 0:
+            print(f'{prod} (id: {prod2idx[prod]}) -> found {len(prod_txns)} transactions')
+        if len(prod_txns) >= min_nonzero:
             candidates = {}
             for s_idx, supp_df in prod_txns.groupby('source'):  # iterate through suppliers
                 supp_ts = convert_txns_to_timeseries(supp_df, min_t, max_t, time_col='ts', amount_col='weight')
-                if (supp_ts > 0).sum() >= min_nonzero:  # has at least min_nonzero nonzero weights
+                if (supp_ts > 0).sum() >= min_nonzero:  # has at least min_nonzero nonzero timesteps
                     buy_df = transactions[transactions['target'] == s_idx]  # all txns where s is buying
                     for b_idx, buy_df_s in buy_df.groupby('product'):  # group by products bought
                         buy_ts = convert_txns_to_timeseries(buy_df_s, min_t, max_t, time_col='ts', amount_col='weight')
@@ -50,7 +54,7 @@ def predict_product_relations_with_corr(transactions, prod2idx, min_nonzero=5, p
 
 def predict_product_relations_with_inventory_module(transactions, firms, products, prod2idx, prod_graph, 
                                                     module_args, num_epochs=100, show_weights=True,
-                                                    prod_emb=None, gpu=0):
+                                                    prod_emb=None, gpu=0, products_to_test=None, patience=5):
     """
     Train inventory module on transactions, return final attention weights.
     """
@@ -70,84 +74,59 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
     maps = []
     min_t = np.min(transactions.ts.values)
     max_t = np.max(transactions.ts.values)
+    no_improvement = 0
+    if products_to_test is not None and len(products_to_test) < 10:
+        return_per_prod = True
+    else:
+        return_per_prod = False
     for ep in range(num_epochs):
+        start_time = time.time()
+        loss, debt_loss, consump_rwd = 0, 0, 0
         for t in range(min_t, max_t+1):
             to_keep = transactions.ts.values == t
             src = torch.Tensor(transactions['source'].values[to_keep]).long().to(device)
             dst = torch.Tensor(transactions['target'].values[to_keep]).long().to(device)
             prod = torch.Tensor(transactions['product'].values[to_keep]).long().to(device) + len(firms)
-            time = torch.Tensor(transactions['ts'].values[to_keep]).long().to(device)
+            ts = torch.Tensor(transactions['ts'].values[to_keep]).long().to(device)
             msg = torch.Tensor(transactions['weight'].values[to_keep].reshape(-1, 1)).to(device)
             
             opt.zero_grad()
-            loss, debt_loss, consump_rwd = module(src, dst, prod, time, msg, prod_emb=prod_emb)
+            loss, debt_loss, consump_rwd = module(src, dst, prod, ts, msg, prod_emb=prod_emb)
             loss.backward(retain_graph=False)
             opt.step()
             module.detach()
-            losses.append((float(loss), float(debt_loss), float(consump_rwd)))
+            loss += float(loss)
+            debt_loss += float(debt_loss)
+            consump_rwd += float(consump_rwd)
+        module.reset()  # reset inventory
+        if loss >= np.min(losses):
+            no_improvement += 1
+        losses.append(loss)
             
         weights = module._get_prod_attention(prod_emb=prod_emb).cpu().detach().numpy()
-        mean_avg_pr = mean_average_precision(prod_graph, prod2idx, weights)
-        maps.append(mean_avg_pr)
+        avg_prec = mean_average_precision(prod_graph, prod2idx, weights, 
+                        products_to_test=products_to_test, return_per_prod=return_per_prod)
+        duration = time.time()-start_time
+        if return_per_prod:
+            mean_avg_prec = np.mean(list(avg_prec.values()))
+            print(f'Ep {ep}: MAP={mean_avg_prec:0.4f}, loss={loss:0.4f}, debt_loss={debt_loss:0.4f}, consump_rwd={consump_rwd:0.4f} [time={duration:0.2f}s]')
+            for p in products_to_test:
+                print(f'{p} -> MAP={avg_prec[p]:0.4f}')
+        else:
+            mean_avg_prec = avg_prec
+            print(f'Ep {ep}: MAP={mean_avg_prec:0.4f}, loss={loss:0.4f}, debt_loss={debt_loss:0.4f}, consump_rwd={consump_rwd:0.4f} [time={duration:0.2f}s]')
+        maps.append(mean_avg_prec)
         
         if show_weights and (ep % 5) == 0:
             pos = plt.imshow(weights)
             plt.colorbar(pos)
             plt.title(f'Ep {ep}')
             plt.show()
-        module.reset()  # reset inventory
+        
+        if no_improvement > patience:
+            print(f'Early stopping since loss did not improve for {patience} epochs')
+            break
     return losses, maps, weights, module
-
-
-def test_inventory_module_on_sem_data():
-    """
-    Test inventory module on SEM.
-    """
-    data_dir = '/lfs/local/0/serinac/supply-chains/TGB/tgb/datasets/tgbl_hypergraph_sem_22_23'
-    data_name = 'tgbl-hypergraph_sem_22_23'
-    
-    with open(os.path.join(data_dir, f'{data_name}_meta.json'), "r") as f:
-        metadata = json.load(f)
-    num_nodes = len(metadata["id2entity"])  
-    num_firms = metadata["product_threshold"]
-    num_products = num_nodes - num_firms
-    # create necessary mappings
-    firms = []
-    firm2idx = {}
-    products = []
-    prod2idx = {}
-    for idx in range(num_nodes):
-        entity = metadata['id2entity'][str(idx)]
-        if idx < num_firms:
-            firms.append(entity)
-            firm2idx[entity] = idx
-        else:
-            idx -= num_firms
-            products.append(entity)
-            prod2idx[entity] = idx
-    
-    # load transactions
-    transactions = pd.read_csv(os.path.join(data_dir, f'{data_name}_edgelist.csv'))
-    assert (transactions.ts.values == sorted(transactions.ts.values)).all()
-    transactions['product'] = transactions['product']-num_firms
-    train_max_ts = transactions.ts.quantile(0.7).astype(int)
-    train_transactions = transactions[transactions.ts <= train_max_ts]
-    print(f'Num txns: {len(transactions)}, num train: {len(train_transactions)}')  # should match tgnpl experiments
-    
-    # make prod_graph
-    sem_codes = [901210, 902780, 903141, 903180]
-    all_parts = []
-    for code in sem_codes:
-        parts = pd.read_csv(os.path.join(data_dir, f'{code}_parts.csv'))
-        print(f'{code} -> num parts={len(parts)}')
-        parts = parts.rename(columns={'prod_hs6':'dest', 'part_hs6':'source'})
-        all_parts.append(parts[['source', 'dest', 'description']])
-    prod_graph = pd.concat(all_parts)
-
-    module_args = {'num_firms': num_firms, 'num_prods': num_products, 'learn_att_direct': True}
-    inv_m = predict_product_relations_with_inventory_module(
-        train_transactions, firms, products, prod2idx, prod_graph, module_args, show_weights=True)
-    return inv_m
     
 
 def train_node2vec_on_product_firm_graph(transactions, firms, products, out_file, emb_dim=64):
@@ -229,8 +208,8 @@ def gridsearch_on_hyperparameters(num_seeds=1):
     
     transactions = pd.read_csv(f'./synthetic_standard.csv')
     print(f'Loaded all transactions -> {len(transactions)} transactions')    
-    train_max_ts = transactions.time.quantile(0.7).astype(int)
-    train_transactions = transactions[transactions.time <= train_max_ts]
+    train_max_ts = transactions.ts.quantile(0.7).astype(int)
+    train_transactions = transactions[transactions.ts <= train_max_ts]
     print(f'Num transactions: overall={len(transactions)}, train={len(train_transactions)}')  # should match tgnpl experiments
     print(f'Running inventory module, random init, experiments with {num_seeds} seeds')
     
@@ -244,7 +223,7 @@ def gridsearch_on_hyperparameters(num_seeds=1):
         print(f'Scaling={scaling}: MAP mean={np.mean(maps):.4f}, std={np.std(maps):.4f}')
 
 
-def compare_methods_on_dataset(dataset_name, try_corr=True, emb_name=None, save_results=False, num_seeds=1):
+def compare_methods_on_synthetic_data(dataset_name, try_corr=True, emb_name=None, save_results=False, num_seeds=1):
     """
     Evaluate production learning methods on standard synthetic data with different settings:
     varying amounts of missingness in transactions, varying amounts of missingness in firms.
@@ -256,8 +235,8 @@ def compare_methods_on_dataset(dataset_name, try_corr=True, emb_name=None, save_
     results = {}
     
     transactions = pd.read_csv(dataset_name)
-    train_max_ts = transactions.time.quantile(0.7).astype(int)
-    train_transactions = transactions[transactions.time <= train_max_ts]
+    train_max_ts = transactions.ts.quantile(0.7).astype(int)
+    train_transactions = transactions[transactions.ts <= train_max_ts]
     print(f'Num transactions: overall={len(transactions)}, train={len(train_transactions)}')  # should match tgnpl experiments
     print(f'Running inventory module, random init, experiments with {num_seeds} seeds')
 
@@ -312,6 +291,136 @@ def compare_methods_on_dataset(dataset_name, try_corr=True, emb_name=None, save_
             pickle.dump(results, f)
         print('Saved results at', fn)
         
+
+def load_SEM_data():
+    """
+    Load SEM data.
+    """
+    # make prod_graph
+    all_parts = []
+    for code in SEM_CODES:
+        parts = pd.read_csv(os.path.join(SEM_DATA_DIR, f'{code}_parts.csv'))
+        print(f'{code} -> num parts={len(parts)}')
+        parts = parts.rename(columns={'prod_hs6':'dest', 'part_hs6':'source'})
+        all_parts.append(parts[['source', 'dest', 'description']])
+    prod_graph = pd.concat(all_parts)
+    
+    with open(os.path.join(SEM_DATA_DIR, f'{SEM_DATA_NAME}_meta.json'), "r") as f:
+        metadata = json.load(f)
+    num_nodes = len(metadata["id2entity"])  
+    num_firms = metadata["product_threshold"]
+    num_products = num_nodes - num_firms
+    # create necessary mappings
+    firms = []
+    firm2idx = {}
+    products = []
+    prod2idx = {}
+    for idx in range(num_nodes):
+        entity = metadata['id2entity'][str(idx)]
+        if idx < num_firms:
+            firms.append(entity)
+            firm2idx[entity] = idx
+        else:
+            idx -= num_firms
+            products.append(entity)
+            prod2idx[entity] = idx
+    
+    # load transactions
+    transactions = pd.read_csv(os.path.join(SEM_DATA_DIR, f'{SEM_DATA_NAME}_edgelist.csv'))
+    assert (transactions.ts.values == sorted(transactions.ts.values)).all()
+    transactions['product'] = transactions['product']-num_firms
+    train_max_ts = transactions.ts.quantile(0.7).astype(int)
+    print('Train max ts:', train_max_ts)
+    train_transactions = transactions[transactions.ts <= train_max_ts]
+    print(f'Num txns: {len(transactions)}, num train: {len(train_transactions)}')  # should match tgnpl experiments
+    return train_transactions, firms, firm2idx, products, prod2idx, prod_graph
+    
+    
+def prep_SEM_data_for_prod_learning():
+    """
+    Preprocess SEM data for inventory module or correlation experiments. Load data + subset it.
+    """
+    train_transactions, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
+    # find all transactions that would affect correlations or inventory module
+    sem_idx = [prod2idx[p] for p in SEM_CODES]
+    suppliers = train_transactions[train_transactions['product'].isin(sem_idx)].source.values
+    print(f'Found {len(suppliers)} suppliers of SEM')
+    to_keep = (train_transactions['source'].isin(suppliers)) | (train_transactions['target'].isin(suppliers))
+    train_transactions = train_transactions[to_keep]
+    print(f'Keeping {len(train_transactions)} directly related transactions')
+    
+    # reindex
+    found_idx = sorted(set(train_transactions['source'].unique()).union(set(train_transactions['target'].unique())))
+    old2new = {old:new for new,old in enumerate(found_idx)}
+    train_transactions['source'] = train_transactions['source'].apply(lambda x: old2new[x])
+    train_transactions['target'] = train_transactions['target'].apply(lambda x: old2new[x])
+    new_firms = [firms[idx] for idx in found_idx]
+    new_firm2idx = {f:i for i,f in enumerate(new_firms)}
+    for f in new_firms:
+        assert new_firm2idx[f] == old2new[firm2idx[f]]
+    
+    found_idx = sorted(set(train_transactions['product'].unique()))
+    old2new = {old:new for new,old in enumerate(found_idx)}
+    train_transactions['product'] = train_transactions['product'].apply(lambda x: old2new[x])
+    new_products = [products[idx] for idx in found_idx]
+    new_prod2idx = {p:i for i,p in enumerate(new_products)}
+    for p in new_products:
+        assert new_prod2idx[p] == old2new[prod2idx[p]]
+    print(f'Original data: {len(firms)} firms, {len(products)} products; kept data: {len(new_firms)} firms, {len(new_products)} products')
+    return train_transactions, new_firms, new_firm2idx, new_products, new_prod2idx, prod_graph
+    
+    
+def compare_methods_on_sem_data(method='inventory'):
+    assert method in ['random', 'corr', 'inventory', 'inventory-corr']
+    if method == 'random':
+        _, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
+    else:
+        transactions, firms, firm2idx, products, prod2idx, prod_graph = prep_SEM_data_for_prod_learning()
+    
+    if method == 'random':
+        maps = {p:[] for p in SEM_CODES}
+        print(f'Testing random matrices of size ({len(products)}, {len(products)})')
+        for i in range(100):
+            np.random.seed(i)
+            rand_mat = np.random.random((len(products), len(products)))
+            rand_map = mean_average_precision(prod_graph, prod2idx, rand_mat, products_to_test=SEM_CODES, 
+                                              return_per_prod=True)
+            for p in SEM_CODES:
+                maps[p].append(rand_map[p])
+        print(f'Random baseline')
+        for p in SEM_CODES:
+            p_maps = maps[p]
+            print(f'{p} -> mean MAP={np.mean(p_maps):0.4f}, std={np.std(p_maps):0.4f}')
+    elif method == 'corr':  # get correlations for all pairs of products
+        start_time = time.time()
+        corr_m = predict_product_relations_with_corr(transactions, prod2idx, verbose=True)
+        with open('corr_sem.pkl', 'wb') as f:
+            pickle.dump(corr_m, f)
+        duration = time.time()-start_time
+        print(f'Finished computing all correlations: time={duration:0.2f}s')
+        corr_map = mean_average_precision(prod_graph, prod2idx, corr_m, products_to_test=SEM_CODES, return_per_prod=True)
+        print(f'Temporal correlations')
+        for p in SEM_CODES:
+            print(f'{p} -> MAP={corr_map[p]:0.4f}')
+    elif method == 'inventory':
+        module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True}
+        losses, maps, weights, module = predict_product_relations_with_inventory_module(
+            transactions, firms, products, prod2idx, prod_graph, module_args, show_weights=False,
+            products_to_test=SEM_CODES, num_epochs=1000)
+        with open('inv_sem_direct.pkl', 'wb') as f:
+            pickle.dump((losses, maps, weights), f)
+    elif method == 'inventory-corr':
+        assert os.path.isfile('corr_sem.pkl')
+        with open('corr_sem.pkl', 'rb') as f:
+            corr_m = pickle.load(f)
+        module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True,
+                       'init_weights': corr_m}
+        losses, maps, weights, module = predict_product_relations_with_inventory_module(
+            transactions, firms, products, prod2idx, prod_graph, module_args, show_weights=False,
+            products_to_test=SEM_CODES)
+        with open('inv_sem_direct_init_corr.pkl', 'wb') as f:
+            pickle.dump((losses, maps, weights), f)
+        
         
 if __name__ == "__main__":    
     # gridsearch_on_hyperparameters()
@@ -319,6 +428,7 @@ if __name__ == "__main__":
 #     embs = ['prod_embs_synthetic_std.pkl', 'prod_embs_synthetic_shocks.pkl', 'prod_embs_synthetic_missing.pkl']
 #     for d, e in zip(datasets, embs):
 #         print(f'===== {d} =====')
-#         compare_methods_on_dataset(d, emb_name=e, save_results=True, num_seeds=10)
+#         compare_methods_on_synthetic_data(d, emb_name=e, save_results=True, num_seeds=10)
 #         print()
-    test_inventory_module_on_sem_data()
+    compare_methods_on_sem_data(method='inventory')   
+    
