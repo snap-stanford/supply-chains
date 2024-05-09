@@ -25,11 +25,12 @@ from torch_geometric.nn import TransformerConv
 from tgb.linkproppred.logger import TensorboardLogger
 from tgb.utils.utils import *
 from tgb.linkproppred.evaluate import Evaluator
+from modules.graphmixer import GraphMixer
 from modules.decoder import DecoderTGNPL
 from modules.emb_module import *
 from modules.msg_func import TGNPLMessage
 from modules.msg_agg import MeanAggregator
-from modules.neighbor_loader import LastNeighborLoaderTGNPL
+from modules.neighbor_loader import LastNeighborLoaderTGNPL, LastNeighborLoaderGraphmixer
 from modules.memory_module import TGNPLMemory, StaticMemory
 from modules.inventory_module import TGNPLInventory, mean_average_precision
 from modules.early_stopping import  EarlyStopMonitor
@@ -58,6 +59,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
         use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
                             (that is, without correction to the loose negatives on Oct 24)
+        include_inventory: whether to include the inventory module 
     Returns:
         y_link_pred: shape is (batch size) x (1 + 3*ns_samples)
         y_amt_pred: shape is (batch size) x 1 if predict_amount is True; else, None
@@ -100,7 +102,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
             device=device,
         )
 
-    elif use_prev_sampling:
+    elif use_prev_sampling: # not supported by graphmixer
         #using the negative sampling procedure prior to Oct 24 (no loose negatives)
         neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
         assert len(neg_batch_list) == bs
@@ -131,17 +133,19 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_prod  # replace pos_prod with negatives
         batch_dst = pos_dst.reshape(bs, 1).repeat(1, num_samples)
         batch_dst[:, (2*ns_samples)+1:] = neg_dst  # replace pos_dst with negatives
-
-    src, dst, prod = batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten()  # row-wise flatten
-    f_id = torch.cat([src, dst]).unique()
-    p_id = torch.cat([prod]).unique()
-    n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
-    assoc[n_id] = torch.arange(n_id.size(0), device=device)
+    
+    batch_t = pos_t.reshape(bs, 1).repeat(1, num_samples)
+    src, dst, prod, t = batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten(), batch_t.flatten()  # row-wise flatten
 
     # get predictions from TGNPL or GraphMixer
     if MODEL_NAME in {'TGNPL', 'GRAPHMIXER'}:
         if MODEL_NAME == 'TGNPL':
             # Get updated memory of all nodes involved in the computation.
+            f_id = torch.cat([src, dst]).unique()
+            p_id = torch.cat([prod]).unique()
+            n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
+            assoc[n_id] = torch.arange(n_id.size(0), device=device)
+            
             memory, last_update, update_loss = model['memory'](n_id)
             z = model['gnn'](
                 memory,
@@ -150,12 +154,30 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                 repeat_tensor(data.t, 2)[e_id].to(device),
                 repeat_tensor(data.msg, 2)[e_id].to(device),
             )
+            y_link_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]]).reshape(bs, num_samples)
         elif MODEL_NAME == 'GRAPHMIXER':
-            # TODO - get embeddings for nodes involved in the computation
-            pass
-        y_link_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]]).reshape(bs, num_samples)
+            batch_src_node_embeddings, batch_dst_node_embeddings, batch_prod_node_embeddings = \
+                model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
+                                                                                  dst_node_ids=dst,
+                                                                                  prod_node_ids=prod,
+                                                                                  node_interact_times=t,
+                                                                                  neighbor_loader=neighbor_loader)
+            y_link_pred = model['link_pred'](batch_src_node_embeddings,
+                                             batch_dst_node_embeddings,
+                                             batch_prod_node_embeddings).squeeze(dim=-1).reshape(bs, num_samples)
         if 'amount_pred' in model:
-            y_amt_pred = model['amount_pred'](z[assoc[pos_src]], z[assoc[pos_dst]], z[assoc[pos_prod]])
+            if MODEL_NAME == 'TGNPL':
+                y_amt_pred = model['amount_pred'](z[assoc[pos_src]], z[assoc[pos_dst]], z[assoc[pos_prod]])
+            elif MODEL_NAME == 'GRAPHMIXER':
+                batch_pos_src_node_embeddings, batch_pos_dst_node_embeddings, batch_pos_prod_node_embeddings = \
+                    model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=pos_src,
+                                                                                      dst_node_ids=pos_dst,
+                                                                                      prod_node_ids=pos_prod,
+                                                                                      node_interact_times=pos_t,
+                                                                                      neighbor_loader=neighbor_loader)
+                y_amt_pred = model['amount_pred'](batch_pos_src_node_embeddings, 
+                                                  batch_pos_dst_node_embeddings,
+                                                  batch_pos_prod_node_embeddings)
             assert y_amt_pred.shape == (bs, 1)
     else:
         update_loss = 0
@@ -229,13 +251,13 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
     Helper function to get current embeddings for all products.
     """
     assert MODEL_NAME in {'TGNPL', 'GRAPHMIXER'}
-    # Helper vector to map global node indices to local ones
-    assoc = torch.empty(num_firms+num_products, dtype=torch.long, device=device)
-    f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
-    p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
-    n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
-    assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
     if MODEL_NAME == 'TGNPL':
+        # Helper vector to map global node indices to local ones
+        assoc = torch.empty(num_firms+num_products, dtype=torch.long, device=device)
+        f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
+        p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
+        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
+        assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
         memory, last_update, update_loss = model['memory'](n_id)
         z = model['gnn'](
             memory,
@@ -246,8 +268,15 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
         )
         prod_embs = z[assoc[p_id]]
     else:
-        # TODO - get product embeddings for GraphMixer
-        pass
+        # TODO
+        src, prod, dst, t, msg = data.src, data.prod, data.dst, data.t, data.msg
+        src_node_embeddings, dst_node_embeddings, prod_node_embeddings = \
+                model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
+                                                                                  dst_node_ids=dst,
+                                                                                  prod_node_ids=prod,
+                                                                                  node_interact_times=t,
+                                                                                  neighbor_loader=neighbor_loader)
+        prod_embs = prod_node_embeddings # TODO: check if this is prob_embs for graphmixer? 
     return prod_embs
 
     
@@ -341,9 +370,11 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         total_num_events += batch.num_events
         
         # Update time-varying states with ground-truth transactions
-        neighbor_loader.insert(batch.src, batch.dst, batch.prod)
         if MODEL_NAME == 'TGNPL':
+            neighbor_loader.insert(batch.src, batch.dst, batch.prod)
             model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
+        elif MODEL_NAME == 'GRAPHMIXER':
+            neighbor_loader.insert(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
                 
         # Update model parameters with backprop
         if update_params:
@@ -412,9 +443,12 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         total_num_events += batch.num_events
         
         # Update time-varying states with ground-truth transactions
-        neighbor_loader.insert(batch.src, batch.dst, batch.prod)
+        
         if MODEL_NAME == 'TGNPL':
+            neighbor_loader.insert(batch.src, batch.dst, batch.prod)
             model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
+        elif MODEL_NAME == 'GRAPHMIXER':
+            neighbor_loader.insert(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
         if 'inventory' in model:
             update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device, 
                 num_firms=num_firms, num_products=num_products)  # ignore loss
@@ -461,8 +495,13 @@ def parse_args():
     parser.add_argument('--weights', type=str, help='Saved weights to initialize model with')
     
     # GraphMixer model parameters
-    # TO ADD
-    
+    parser.add_argument('--num_layers', type=int, default=2, help='number of model layers')
+    parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
+    parser.add_argument('--time_gap', type=int, default=2000, help='time gap')
+    parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
+    parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
+    parser.add_argument('--node_features_dim', type=int, help='Node features dimension', default=10)
+
     # inventory module parameters
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
     parser.add_argument('--inv_loss_weight', type=float, help='How much to weigh inventory loss; only used with use_inventory', default=0.001)
@@ -544,7 +583,6 @@ def do_hyperparameter_sweep(fixed_args, dims=None, batch_sizes=None, gpus=None):
 # == Functions to run complete experiments
 # ===========================================
 # Global variables
-MODEL_NAME = 'TGNPL'
 TGB_DIRECTORY = "/".join(str(__file__).split("/")[:-4])
 PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
 NUM_FIRMS = -1
@@ -609,17 +647,34 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         # put together in model and initialize optimizer
         all_params = set(model['memory'].parameters()) | set(model['gnn'].parameters()) | set(model['link_pred'].parameters())
 
-        # add amount predictor if required
-        if not args.skip_amount:
-            amt_pred = DecoderTGNPL(in_channels=emb_dim).to(device)  # can use the same architecture
-            model['amount_pred'] = amt_pred
     elif MODEL_NAME == 'GRAPHMIXER':
-        # TODO - need to set emb_dim
-        pass
+        # initialize node features for firms and products  
+        node_raw_features = torch.rand(num_nodes, args.node_features_dim).float().to(device)
+        node_raw_features[:num_firms, :] -= 1
+        
+        # initialize graphmixer layer
+        edge_feat_dim = data.msg.shape[1]
+        graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
+                                time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, token_dim_expansion_factor=args.token_dim_expansion_factor, channel_dim_expansion_factor=args.channel_dim_expansion_factor).to(device)
+        model['graphmixer'] = graphmixer
+
+        # initialize decoder layer
+        emb_dim = node_raw_features.shape[1]
+        link_pred = DecoderTGNPL(in_channels=emb_dim).to(device) # same as MergeLayer, but without .sigmoid() at the outmost layer
+        model['link_pred'] = link_pred
+
+        # put together in model and initialize optimizer
+        all_params = set(model['graphmixer'].parameters()) | set(model['link_pred'].parameters())
+        
     else:
         all_params = set()
         emb_dim = None
     
+    # add amount predictor if required
+    if not args.skip_amount:
+        amt_pred = DecoderTGNPL(in_channels=emb_dim).to(device)  # can use the same architecture
+        model['amount_pred'] = amt_pred
+
     # add inventory module if required
     if MODEL_NAME == 'INVENTORY' or args.use_inventory:
         if args.att_weights is not None:
@@ -793,7 +848,12 @@ def run_experiment(args):
         prod_graph = None
     
     # Initialize neighbor loader
-    neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=args.num_neighbors, device=device)
+    if MODEL_NAME == 'TGNPL':
+        neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=args.num_neighbors, device=device)
+    elif MODEL_NAME == 'GRAPHMIXER':
+        neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, num_neighbors=args.num_neighbors, time_gap=args.time_gap, edge_feat_dim=data.msg.shape[1], device=device)
+    else: 
+        neighbor_loader = None
 
     print("==========================================================")
     print(f"=================*** {MODEL_NAME}: LinkPropPred: {args.dataset} ***=============")
