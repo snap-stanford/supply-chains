@@ -165,6 +165,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
             y_link_pred = model['link_pred'](batch_src_node_embeddings,
                                              batch_dst_node_embeddings,
                                              batch_prod_node_embeddings).squeeze(dim=-1).reshape(bs, num_samples)
+            update_loss = 0 # TODO: is this true? 
         if 'amount_pred' in model:
             if MODEL_NAME == 'TGNPL':
                 y_amt_pred = model['amount_pred'](z[assoc[pos_src]], z[assoc[pos_dst]], z[assoc[pos_prod]])
