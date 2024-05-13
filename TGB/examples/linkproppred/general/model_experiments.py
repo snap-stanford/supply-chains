@@ -1,6 +1,7 @@
 import wandb
 import math
 import timeit
+import time
 from tqdm import tqdm
 import json
 import argparse 
@@ -484,6 +485,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
     parser.add_argument('--skip_amount', action="store_true", help='If true, skip amount prediction')
     parser.add_argument('--sweep', action='store_true', help='Launch hyperparameter sweep')
+    parser.add_argument('--num_neighbors', type=int, help='Number of neighbors to store in NeighborLoader', default=10)
     
     # TGN-PL model parameters
     parser.add_argument('--memory_name', type=str, help='Name of memory module', default='tgnpl', choices=['tgnpl', 'static'])
@@ -491,7 +493,6 @@ def parse_args():
     parser.add_argument('--mem_dim', type=int, help='Memory dimension', default=100)
     parser.add_argument('--emb_dim', type=int, help='Embedding dimension', default=100)
     parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
-    parser.add_argument('--num_neighbors', type=int, help='Number of neighbors to store in NeighborLoader', default=10)
     parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
     parser.add_argument('--weights', type=str, help='Saved weights to initialize model with')
     
@@ -549,36 +550,34 @@ def get_unique_id_for_experiment(args):
     exp_id = f'{args.model.upper()}_{args.dataset}_{args.use_inventory}_{curr_time}'
     return exp_id
 
-def do_hyperparameter_sweep(fixed_args, dims=None, batch_sizes=None, gpus=None):
+def do_hyperparameter_sweep(hyperparameters, fixed_args, gpus=None):
     """
     Helper function to launch hyperparameter sweep.
+    hyperparameters is a list of dicts.
     """
-    assert dims is not None or batch_sizes is not None
     assert 'dataset' in fixed_args
     dataset = fixed_args['dataset']
-    if dims is None:
-        dims = [100]  # default
-    if batch_sizes is None:
-        batch_sizes = [100]  # default
     if gpus is None:
-        gpus = [0]  # default
-    idx = 0
-    for d in dims:
-        for bs in batch_sizes:
-            cmd = 'nohup python -u model_experiments.py '
-            for arg,val in fixed_args.items():
-                if val is None:
-                    cmd += f'--{arg} '
-                else:
-                    cmd += f'--{arg} {val} '
-            cmd += f'--gpu {gpus[idx % len(gpus)]} '
-            cmd += f'--mem_dim {d} --emb_dim {d} '
-            cmd += f'--bs {bs} '
-            out_file = f'{dataset}_d{d}_bs{bs}.out'
-            cmd += f'> {out_file} 2>&1 &'
-            print(cmd)
-            idx += 1
-            os.system(cmd)
+        gpus = range(torch.cuda.device_count())
+    print(hyperparameters)
+    for idx, hyps in enumerate(hyperparameters):
+        cmd = 'nohup python -u model_experiments.py '
+        out_elements = [dataset]
+        for arg,val in hyps.items():
+            cmd += f'--{arg} {val} '
+            out_elements.append(f'{arg}={val}')
+        for arg,val in fixed_args.items():
+            if val is None:
+                cmd += f'--{arg} '
+            else:
+                cmd += f'--{arg} {val} '
+        cmd += f'--gpu {gpus[idx % len(gpus)]} '
+        out_file = '_'.join(out_elements) + '.out'
+        cmd += f'> {out_file} 2>&1 &'
+        print(cmd)
+        os.system(cmd)
+        time.sleep(5)
+            
     
 # ===========================================
 # == Functions to run complete experiments
@@ -656,7 +655,10 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         # initialize graphmixer layer
         edge_feat_dim = data.msg.shape[1]
         graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
-                                time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, dropout=args.dropout, time_gap=args.time_gap, token_dim_expansion_factor=args.token_dim_expansion_factor, channel_dim_expansion_factor=args.channel_dim_expansion_factor).to(device)
+                                time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, 
+                                dropout=args.dropout, time_gap=args.time_gap, 
+                                token_dim_expansion_factor=args.token_dim_expansion_factor, 
+                                channel_dim_expansion_factor=args.channel_dim_expansion_factor).to(device)
         model['graphmixer'] = graphmixer
 
         # initialize decoder layer
@@ -1046,8 +1048,16 @@ if __name__ == "__main__":
     # Parse parameters
     args, defaults, _ = parse_args()
     if args.sweep:
-        do_hyperparameter_sweep({'dataset': 'tgbl-hypergraph_synthetic_std', 'train_with_fixed_samples': None}, 
-                                dims=[1000], batch_sizes=[16,32,64,128,256], gpus=[2,3,4,6,9])
+        hyps_list = []
+        for bs in [15, 30, 50, 200]:
+            hyperparameters = {'bs': bs}
+            hyps_list.append(hyperparameters)
+        fixed_args = {'model': 'tgnpl', 
+                      'dataset': 'tgbl-hypergraph_synthetic_std', 
+                      'train_with_fixed_samples': None,
+                      'mem_dim': 500,
+                      'emb_dim': 500}
+        do_hyperparameter_sweep(hyps_list, fixed_args)
 #     labeling_args = compare_args(args, defaults)
     else:
         run_experiment(args)
