@@ -8,12 +8,15 @@ EMPTY_VALUE = -1 # same as what's filled in all attributes when resetting the ne
 
 class GraphMixer(nn.Module):
 
-    def __init__(self, node_raw_features: torch.Tensor, edge_feat_dim: int,
-                 time_feat_dim: int, num_tokens: int, num_layers: int = 2, token_dim_expansion_factor: float = 0.5,
-                 channel_dim_expansion_factor: float = 4.0, dropout: float = 0.1, time_gap: int = 2000, 
+    def __init__(self, num_nodes: int, edge_feat_dim: int, time_feat_dim: int, 
+                 num_tokens: int, num_channels: int = 10, num_layers: int = 2, 
+                 node_raw_features: torch.Tensor = None, node_feat_dim: int = 100,
+                 token_dim_expansion_factor: float = 0.5, channel_dim_expansion_factor: float = 4.0, 
+                 dropout: float = 0.1, time_gap: int = 2000, 
                  debug: bool=False, mimic_static_debug: bool=False): # TODO: delete debug flag
         """
-        TCL model.
+        GraphMixer model.
+                                
         :param node_raw_features: Tensor, shape (num_nodes + 1, node_feat_dim)
         :param edge_feat_dim: int, edge feature dimension (axis=1)
         :param time_feat_dim: int, dimension of time features (encodings)
@@ -27,14 +30,18 @@ class GraphMixer(nn.Module):
         :param mimic_static_debug: construct graphmixer similar to tgnpl static when debugging
         """
         super(GraphMixer, self).__init__()
-
-        self.node_raw_features = node_raw_features.float() # this is preset to full data features  
+        self.num_nodes = num_nodes
+        if node_raw_features is None:
+            self.node_raw_features = nn.Parameter(torch.rand(self.num_nodes, node_feat_dim))  # make node features learnable
+        else:
+            self.node_raw_features = node_raw_features.float()  # node features are provided
 
         self.neighbor_sampler = None # assigned later 
         self.node_feat_dim = self.node_raw_features.shape[1]
         self.edge_feat_dim = edge_feat_dim
         self.time_feat_dim = time_feat_dim
         self.num_tokens = num_tokens
+        self.num_channels = num_channels
         self.num_layers = num_layers
         self.token_dim_expansion_factor = token_dim_expansion_factor
         self.channel_dim_expansion_factor = channel_dim_expansion_factor
@@ -44,7 +51,6 @@ class GraphMixer(nn.Module):
         self.debug = debug
         self.mimic_static_debug = mimic_static_debug # TODO: delete debug flag
 
-        self.num_channels = self.edge_feat_dim
         # in GraphMixer, the time encoding function is not trainable
         self.time_encoder = TimeEncoder(time_dim=time_feat_dim, parameter_requires_grad=False)
         self.projection_layer = nn.Linear(self.edge_feat_dim + time_feat_dim, self.num_channels)
@@ -154,10 +160,9 @@ class GraphMixer(nn.Module):
         
         if self.mimic_static_debug:
             output_node_features = self.node_raw_features[node_ids]
-
+    
         # Tensor, shape (batch_size, node_feat_dim)
         node_embeddings = self.output_layer(torch.cat([combined_features, output_node_features], dim=1))
-
         return node_embeddings
     
 class FeedForwardNet(nn.Module):

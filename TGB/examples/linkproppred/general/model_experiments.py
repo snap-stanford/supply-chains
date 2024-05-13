@@ -648,21 +648,17 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         all_params = set(model['memory'].parameters()) | set(model['gnn'].parameters()) | set(model['link_pred'].parameters())
 
     elif MODEL_NAME == 'GRAPHMIXER':
-        # initialize node features for firms and products  
-        node_raw_features = torch.rand(num_nodes, args.node_features_dim).float().to(device)
-        node_raw_features[:num_firms, :] -= 1
-        
         # initialize graphmixer layer
         edge_feat_dim = data.msg.shape[1]
-        graphmixer = GraphMixer(node_raw_features=node_raw_features, edge_feat_dim=edge_feat_dim,
+        graphmixer = GraphMixer(num_nodes=num_nodes, edge_feat_dim=edge_feat_dim,
                                 time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, 
-                                dropout=args.dropout, time_gap=args.time_gap, 
+                                node_feat_dim=args.node_features_dim, dropout=args.dropout, time_gap=args.time_gap, 
                                 token_dim_expansion_factor=args.token_dim_expansion_factor, 
                                 channel_dim_expansion_factor=args.channel_dim_expansion_factor).to(device)
         model['graphmixer'] = graphmixer
 
         # initialize decoder layer
-        emb_dim = node_raw_features.shape[1]
+        emb_dim = graphmixer.node_feat_dim
         link_pred = DecoderTGNPL(in_channels=emb_dim).to(device) # same as MergeLayer, but without .sigmoid() at the outmost layer
         model['link_pred'] = link_pred
 
@@ -763,7 +759,7 @@ def run_experiment(args):
     Run a complete experiment.
     """
     global MODEL_NAME, NUM_FIRMS, NUM_PRODUCTS  # add this to modify global variables
-    print('Starting...')
+    print('Args:', args)
     start_overall = timeit.default_timer()
     MODEL_NAME = args.model.upper()
     exp_id = get_unique_id_for_experiment(args)
@@ -851,12 +847,11 @@ def run_experiment(args):
         prod_graph = None
     
     # Initialize neighbor loader
-    if MODEL_NAME == 'TGNPL':
+    if MODEL_NAME in {'TGNPL', 'INVENTORY'}:
         neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=args.num_neighbors, device=device)
     elif MODEL_NAME == 'GRAPHMIXER':
-        neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, num_neighbors=args.num_neighbors, time_gap=args.time_gap, edge_feat_dim=data.msg.shape[1], device=device)
-    else: 
-        neighbor_loader = None
+        neighbor_loader = LastNeighborLoaderGraphmixer(num_nodes, num_neighbors=args.num_neighbors, 
+                              time_gap=args.time_gap, edge_feat_dim=data.msg.shape[1], device=device)
 
     print("==========================================================")
     print(f"=================*** {MODEL_NAME}: LinkPropPred: {args.dataset} ***=============")
@@ -883,6 +878,7 @@ def run_experiment(args):
         
         start_train_val = timeit.default_timer()
         for epoch in range(1, args.num_epoch + 1):
+            # train
             start_epoch_train = timeit.default_timer()
             if args.train_on_val:
                 # used for debugging: train on validation, with fixed negative samples
@@ -933,10 +929,10 @@ def run_experiment(args):
                     pred_mat = model['inventory']._get_prod_attention(prod_emb=prod_embs).cpu().detach().numpy()
                 prod_map = mean_average_precision(prod_graph, prod2idx, pred_mat)
                 print(f'\tProduction function MAP: {prod_map:.4f}')
-        
             time_val = timeit.default_timer() - start_val
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
-            # log metrics to tensorboard and wandb
+            
+            # log metrics
             log_dict = loss_dict.copy()
             log_dict[f'val_link_pred_{metric}'] = val_dict['link_pred']
             log_dict['val_amount_pred_RMSE'] = val_dict['amount_pred']
@@ -1049,14 +1045,15 @@ if __name__ == "__main__":
     args, defaults, _ = parse_args()
     if args.sweep:
         hyps_list = []
-        for bs in [15, 30, 50, 200]:
-            hyperparameters = {'bs': bs}
+        for num_neighbors in [5, 20, 50]:
+            hyperparameters = {'num_neighbors': num_neighbors}
             hyps_list.append(hyperparameters)
         fixed_args = {'model': 'tgnpl', 
                       'dataset': 'tgbl-hypergraph_synthetic_std', 
                       'train_with_fixed_samples': None,
                       'mem_dim': 500,
-                      'emb_dim': 500}
+                      'emb_dim': 500,
+                      'bs': 30}
         do_hyperparameter_sweep(hyps_list, fixed_args)
 #     labeling_args = compare_args(args, defaults)
     else:
