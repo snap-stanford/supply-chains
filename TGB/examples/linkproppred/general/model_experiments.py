@@ -503,6 +503,7 @@ def parse_args():
     parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
     parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
     parser.add_argument('--node_features_dim', type=int, help='Node features dimension', default=10)
+    parser.add_argument('--num_channels', type=int, help='MLP projection dimension', default=10)
 
     # inventory module parameters
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
@@ -651,7 +652,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         # initialize graphmixer layer
         edge_feat_dim = data.msg.shape[1]
         graphmixer = GraphMixer(num_nodes=num_nodes, edge_feat_dim=edge_feat_dim,
-                                time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_layers=args.num_layers, 
+                                time_feat_dim=args.time_dim, num_tokens=args.num_neighbors, num_channels=args.num_channels, num_layers=args.num_layers, 
                                 node_feat_dim=args.node_features_dim, dropout=args.dropout, time_gap=args.time_gap, 
                                 token_dim_expansion_factor=args.token_dim_expansion_factor, 
                                 channel_dim_expansion_factor=args.channel_dim_expansion_factor).to(device)
