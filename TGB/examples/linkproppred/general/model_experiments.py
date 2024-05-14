@@ -822,30 +822,6 @@ def run_experiment(args):
     if args.train_with_fixed_samples:
         print('Using fixed negative samples for train')
     
-    # Initialize model
-    model, opt = set_up_model(args, data, device)
-    if args.weights is not None:
-        print('Initializing model with weights from', args.weights)
-        model_path = os.path.join(save_model_dir, args.weights)
-        assert os.path.isfile(model_path)
-        saved_model = torch.load(model_path)
-        try:
-            # try initializing for all modules
-            for module_name, module in model.items():
-                module.load_state_dict(saved_model[module_name])
-            print('Success: matched all model modules and loaded weights')
-        except:
-            raise Exception('Failed to initialize model with weights')
-            
-    # Load ground-truth production functions, if they are provided
-    if 'inventory' in model and args.prod_graph is not None:
-        with open(args.prod_graph, 'rb') as f:
-            prod_graph, products = pickle.load(f)
-            prod2idx = {p:i for i,p in enumerate(products)}
-        assert len(products) == NUM_PRODUCTS
-    else:
-        prod_graph = None
-    
     # Initialize neighbor loader
     if MODEL_NAME in {'TGNPL', 'INVENTORY'}:
         neighbor_loader = LastNeighborLoaderTGNPL(num_nodes, size=args.num_neighbors, device=device)
@@ -868,6 +844,30 @@ def run_experiment(args):
         early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id, 
                                          tolerance=args.tolerance, patience=args.patience,
                                          ignore_patience_num_epoch=args.ignore_patience_num_epoch)
+        
+        # Initialize model
+        model, opt = set_up_model(args, data, device)
+        if args.weights is not None:
+            print('Initializing model with weights from', args.weights)
+            model_path = os.path.join(save_model_dir, args.weights)
+            assert os.path.isfile(model_path)
+            saved_model = torch.load(model_path)
+            try:
+                # try initializing for all modules
+                for module_name, module in model.items():
+                    module.load_state_dict(saved_model[module_name])
+                print('Success: matched all model modules and loaded weights')
+            except:
+                raise Exception('Failed to initialize model with weights')
+
+        # Load ground-truth production functions, if they are provided
+        if 'inventory' in model and args.prod_graph is not None:
+            with open(args.prod_graph, 'rb') as f:
+                prod_graph, products = pickle.load(f)
+                prod2idx = {p:i for i,p in enumerate(products)}
+            assert len(products) == NUM_PRODUCTS
+        else:
+            prod_graph = None
 
         # ==================================================== Train & Validation
         train_loss_list = []
@@ -1045,16 +1045,25 @@ if __name__ == "__main__":
     args, defaults, _ = parse_args()
     if args.sweep:
         hyps_list = []
-        for num_neighbors in [5, 20, 50]:
-            hyperparameters = {'num_neighbors': num_neighbors}
+#         for num_neighbors in [5, 20, 50]:
+#             hyperparameters = {'num_neighbors': num_neighbors}
+#             hyps_list.append(hyperparameters)
+#         fixed_args = {'model': 'tgnpl', 
+#                       'dataset': 'tgbl-hypergraph_synthetic_std', 
+#                       'train_with_fixed_samples': None,
+#                       'mem_dim': 500,
+#                       'emb_dim': 500,
+#                       'bs': 30}
+        for dim in [100, 1000, 1500]:
+            hyperparameters = {'node_features_dim': dim}
             hyps_list.append(hyperparameters)
-        fixed_args = {'model': 'tgnpl', 
-                      'dataset': 'tgbl-hypergraph_synthetic_std', 
+        fixed_args = {'model': 'graphmixer',
+                      'dataset': 'tgbl-hypergraph_synthetic_std',
                       'train_with_fixed_samples': None,
-                      'mem_dim': 500,
-                      'emb_dim': 500,
-                      'bs': 30}
-        do_hyperparameter_sweep(hyps_list, fixed_args)
+                      'bs': 30,
+                      'time_gap': 10}
+        gpus = [5,6,7]
+        do_hyperparameter_sweep(hyps_list, fixed_args, gpus=gpus)
 #     labeling_args = compare_args(args, defaults)
     else:
         run_experiment(args)
