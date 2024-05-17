@@ -547,8 +547,9 @@ def get_unique_id_for_experiment(args):
     Returns a unique ID for an experiment.
     """
     curr_time = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
-    # include important parameters + time
-    exp_id = f'{args.model.upper()}_{args.dataset}_{args.use_inventory}_{curr_time}'
+    addl_id = f"{args.memory_name}_{args.emb_name}_{args.gpu}"
+    # include important parameters + time + additional identifier to prevent collision at large-scale launching
+    exp_id = f'{args.model.upper()}_{args.dataset}_{args.use_inventory}_{curr_time}_{addl_id}'
     return exp_id
 
 def do_hyperparameter_sweep(hyperparameters, fixed_args, gpus=None):
