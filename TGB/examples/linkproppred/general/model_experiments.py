@@ -511,7 +511,7 @@ def parse_args():
     parser.add_argument('--learn_att_direct', action='store_true', help='Whether to learn pairwise attention')
     parser.add_argument('--att_weights', type=str, help='Saved attention weights for inventory module')
     parser.add_argument('--fix_inventory', action="store_true", help='Treat inventory module as fixed, don\'t update')
-    parser.add_argument('--prod_graph', type=str, default='synthetic_prod_graph.pkl')
+    parser.add_argument('--prod_graph', type=str, default=None) # default='synthetic_prod_graph.pkl')
     
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
