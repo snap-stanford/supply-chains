@@ -507,7 +507,7 @@ def parse_args():
     parser.add_argument('--learn_att_direct', action='store_true', help='Whether to learn pairwise attention')
     parser.add_argument('--att_weights', type=str, help='Saved attention weights for inventory module')
     parser.add_argument('--fix_inventory', action="store_true", help='Treat inventory module as fixed, don\'t update')
-    parser.add_argument('--prod_graph', type=str, default='synthetic_prod_graph.pkl')
+    parser.add_argument('--prod_graph', type=str, default=None) # default='synthetic_prod_graph.pkl')
     
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
@@ -543,8 +543,9 @@ def get_unique_id_for_experiment(args):
     Returns a unique ID for an experiment.
     """
     curr_time = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
-    # include important parameters + time
-    exp_id = f'{args.model.upper()}_{args.dataset}_{args.use_inventory}_{curr_time}'
+    addl_id = f"{args.memory_name}_{args.emb_name}_{args.gpu}"
+    # include important parameters + time + additional identifier to prevent collision at large-scale launching
+    exp_id = f'{args.model.upper()}_{args.dataset}_{args.use_inventory}_{curr_time}_{addl_id}'
     return exp_id
 
 def do_hyperparameter_sweep(hyperparameters, fixed_args, gpus=None):
