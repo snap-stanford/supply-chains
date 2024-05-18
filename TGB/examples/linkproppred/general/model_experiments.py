@@ -206,10 +206,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         neg_ones = torch.full(caps.shape, -1, dtype=caps.dtype).to(device)
         no_parts = torch.isclose(caps, neg_ones)  
         assert (caps[~no_parts] >= 0).all()
-        skip_amt = to_skip | no_parts
-        amt_exceeds_cap = (batch.amt[~skip_amt] > caps[~skip_amt]).float().mean()  # real amount should rarely exceed cap
-        if amt_exceeds_cap > 0.1:
-            print(f'Warning: batch ts={batch.t.unique()}; amount exceeds inventory caps {amt_exceeds_cap:0.3f} of the time')
+        skip_amt = to_skip | no_parts | torch.isclose(caps, torch.zeros_like(caps))  # zero suggests incorrect prediction
         caps = (torch.log(caps)-AMT_MEAN)/AMT_STD  # apply log and standard scaling, -1 will become nan
         caps = caps.reshape(-1, 1)
         
@@ -270,7 +267,6 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
         )
         prod_embs = z[assoc[p_id]]
     else:
-        # TODO
         src, prod, dst, t, msg = data.src, data.prod, data.dst, data.t, data.msg
         src_node_embeddings, dst_node_embeddings, prod_node_embeddings = \
                 model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
@@ -332,7 +328,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         y_link_pred, y_amt_pred, update_loss = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, ns_samples=ns_samples, neg_sampler=neg_sampler, 
             split_mode=split_mode, num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling,
-            include_inventory=(MODEL_NAME=='INVENTORY'))
+            include_inventory=True)
         assert y_link_pred.size(1) == (3*ns_samples)+1
 
         if loss_name == 'ce-softmax':
@@ -586,6 +582,7 @@ def do_hyperparameter_sweep(hyperparameters, fixed_args, gpus=None):
 # Global variables
 TGB_DIRECTORY = "/".join(str(__file__).split("/")[:-4])
 PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
+MODEL_NAME = 'TGNPL'
 NUM_FIRMS = -1
 NUM_PRODUCTS = -1
 AMT_MEAN = None
@@ -603,7 +600,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
     num_nodes = num_firms + num_products
 
     model = {}
-    assert MODEL_NAME in {'TGNPL', 'GRAPHMIXER', 'INVENTORY'}
+    assert MODEL_NAME in {'TGNPL', 'GRAPHMIXER', 'INVENTORY'}, f'MODEL_NAME {MODEL_NAME} is not valid!'
     if MODEL_NAME == 'TGNPL':
         # initialize memory module
         if args.memory_name == 'tgnpl':
@@ -910,6 +907,15 @@ def run_experiment(args):
             loss_str = ', '.join([f'{s}: {l:.4f}' for s,l in loss_dict.items()])
             print(f'Epoch: {epoch:02d}, {loss_str}; Training elapsed Time (s): {time_train:.4f}')
             train_loss_list.append(loss_dict['loss'])
+            
+            if prod_graph is not None:  # this means model has inventory AND production functions were provided
+                if model['inventory'].learn_att_direct:
+                    pred_mat = model['inventory']._get_prod_attention().cpu().detach().numpy()
+                else:  # use prod embeddings from end of train
+                    prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
+                    pred_mat = model['inventory']._get_prod_attention(prod_emb=prod_embs).cpu().detach().numpy()
+                prod_map = mean_average_precision(prod_graph, prod2idx, pred_mat)
+                print(f'\tProduction function MAP: {prod_map:.4f}')
 
             # validation
             start_val = timeit.default_timer()
@@ -921,17 +927,9 @@ def run_experiment(args):
             print(f"\tValidation {metric}: {val_dict['link_pred']:.4f}, RMSE: {val_dict['amount_pred']:.4f}")
             val_link_perf_list.append(val_dict['link_pred'])
             val_amt_perf_list.append(val_dict['amount_pred'])
-                
-            if prod_graph is not None:  # this means model has inventory AND production functions were provided
-                if model['inventory'].learn_att_direct:
-                    pred_mat = model['inventory']._get_prod_attention().cpu().detach().numpy()
-                else:
-                    prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
-                    pred_mat = model['inventory']._get_prod_attention(prod_emb=prod_embs).cpu().detach().numpy()
-                prod_map = mean_average_precision(prod_graph, prod2idx, pred_mat)
-                print(f'\tProduction function MAP: {prod_map:.4f}')
             time_val = timeit.default_timer() - start_val
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
+                
             
             # log metrics
             log_dict = loss_dict.copy()
@@ -1055,16 +1053,18 @@ if __name__ == "__main__":
 #                       'mem_dim': 500,
 #                       'emb_dim': 500,
 #                       'bs': 30}
-        for dim in [100, 1000, 1500]:
-            hyperparameters = {'node_features_dim': dim}
+        for num_neighbors in [5, 20, 50]:
+            hyperparameters = {'num_neighbors': num_neighbors, 'time_gap': num_neighbors}
             hyps_list.append(hyperparameters)
         fixed_args = {'model': 'graphmixer',
                       'dataset': 'tgbl-hypergraph_synthetic_std',
                       'train_with_fixed_samples': None,
-                      'bs': 30,
-                      'time_gap': 10}
-        gpus = [5,6,7]
-        do_hyperparameter_sweep(hyps_list, fixed_args, gpus=gpus)
+                      'node_features_dim': 500,
+                      'num_channels': 100,
+                      'time_gap': 10,
+                      'bs': 30}
+        do_hyperparameter_sweep(hyps_list, fixed_args, gpus=[5, 6, 7])
 #     labeling_args = compare_args(args, defaults)
     else:
+        torch.autograd.set_detect_anomaly(True)
         run_experiment(args)
