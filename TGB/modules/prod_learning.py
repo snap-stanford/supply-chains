@@ -16,10 +16,11 @@ import time
 from inventory_module import TGNPLInventory, mean_average_precision
 from synthetic_data import *
 
-PATH_TO_DATASETS = f'/dfs/scratch0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
+PATH_TO_DATASETS = f'/lfs/local/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/'
 SEM_DATA_NAME = 'tgbl-hypergraph_sem_23_subset'
 SEM_CODES = [901210, 902780, 903141] # , 903180]
-ALL_METHODS = ['random', 'corr', 'pmi', 'node2vec', 'inventory', 'inventory-corr', 'inventory-node2vec', 'inventory-emb']
+ALL_METHODS = ['random', 'corr', 'pmi', 'node2vec', 'inventory', 'inventory-corr', 
+               'inventory-node2vec', 'inventory-emb', 'inventory-tgnpl']
 
 
 def predict_product_relations_with_corr(transactions, prod2idx, min_nonzero=5, products_to_test=None,
@@ -156,10 +157,11 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
     print(f'Before training: MAP={prod_map:0.4f}')
     
     # train inventory module
+    timesteps = transactions.ts.unique()
     losses = []
     maps = []
-    timesteps = transactions.ts.unique()
     no_improvement = 0
+    best_weights = None
     for ep in range(num_epochs):
         start_time = time.time()
         loss, debt_loss, consump_rwd = 0, 0, 0
@@ -192,18 +194,18 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
         prod_map = mean_average_precision(prod_graph, prod2idx, weights, products_to_test=products_to_test)
         duration = time.time()-start_time
         print(f'Ep {ep}: MAP={prod_map:0.4f}, loss={loss:0.4f}, debt_loss={debt_loss:0.4f}, consump_rwd={consump_rwd:0.4f} [time={duration:0.2f}s]')
-        if len(maps) > 0:
-            if prod_map > np.max(maps):  # new best
-                no_improvement = 0
-            else: 
-                no_improvement += 1
+        if len(maps) == 0 or prod_map > np.max(maps):
+            no_improvement = 0
+            best_weights = weights.copy()
+        else: 
+            no_improvement += 1
         maps.append(prod_map)
         
         if no_improvement >= patience:
             print(f'Early stopping since MAP did not improve for {patience} epochs')
             break
     print(f'Best MAP: {np.max(maps):0.4f}')
-    return losses, maps, weights, module
+    return losses, maps, best_weights, module
 
 
 def test_inventory_module_for_multiple_seeds(num_seeds, train_transactions, firms, products, prod2idx, 
@@ -212,15 +214,17 @@ def test_inventory_module_for_multiple_seeds(num_seeds, train_transactions, firm
     Helper function to test inventory module over multiple seeds.
     """
     maps = []
+    mats = []
     for s in range(num_seeds):
         print(f'\n=== SEED {s} ===')
         module_args['seed'] = s
-        _, maps_s, _, _ = predict_product_relations_with_inventory_module(
+        _, maps_s, mat_s, _ = predict_product_relations_with_inventory_module(
             train_transactions, firms, products, prod2idx, prod_graph, module_args, 
             prod_emb=prod_emb, products_to_test=products_to_test)
         maps.append(np.max(maps_s))
+        mats.append(mat_s)
     print(f'\nOver {num_seeds} seeds: mean MAP={np.mean(maps):0.4f}, std={np.std(maps):0.4f}')
-    return maps
+    return maps, mats
 
 
 def gridsearch_on_hyperparameters(num_seeds=1):
@@ -328,7 +332,7 @@ def load_SEM_data(only_train=True):
     return transactions, firms, firm2idx, products, prod2idx, prod_graph
     
     
-def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, gpu=0, save_corr=False):
+def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, gpu=0, save_results=False):
     """
     Evaluate production learning methods on data.
     """
@@ -347,20 +351,10 @@ def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, 
         postfix = 'sem'
     device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
     
-    if 'random' in methods:
-        print(f'\nTesting random matrices of size ({len(products)}, {len(products)})...')
-        maps = []
-        for i in range(num_seeds):
-            np.random.seed(i)
-            rand_mat = np.random.random((len(products), len(products)))
-            rand_map = mean_average_precision(prod_graph, prod2idx, rand_mat, products_to_test=products_to_test)
-            maps.append(rand_map)
-        print(f'MAP over {num_seeds} seeds: mean={np.mean(maps):0.4f}, std={np.std(maps):0.4f}')
-    
     if 'corr' in methods:  # get correlations for all pairs of products
         print('\nPredicting production functions with temporal correlations...')
         corr_m = predict_product_relations_with_corr(transactions, prod2idx, products_to_test=products_to_test)
-        if save_corr:
+        if save_results:
             with open(f'corr_{postfix}.pkl', 'wb') as f:
                 pickle.dump(corr_m, f)
         corr_map = mean_average_precision(prod_graph, prod2idx, corr_m, products_to_test=products_to_test)
@@ -384,8 +378,11 @@ def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, 
         print('\nPredicting production functions with inventory module, direct attention, random init...')
         module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': True,
                        'device': device}
-        test_inventory_module_for_multiple_seeds(num_seeds, transactions, firms, products, prod2idx, 
+        maps, mats = test_inventory_module_for_multiple_seeds(num_seeds, transactions, firms, products, prod2idx, 
                                                  prod_graph, module_args, products_to_test=products_to_test)
+        if save_results:
+            with open(f'inventory_{postfix}.pkl', 'wb') as f:
+                pickle.dump(mats[np.argmax(maps)], f)
     
     if 'inventory-corr' in methods:
         print('\nPredicting production functions with inventory module, direct attention, initialized by correlations...')
@@ -397,6 +394,9 @@ def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, 
                        'init_weights': corr_m, 'device': device}  # no randomness since weights are initialized
         losses, maps, weights, module = predict_product_relations_with_inventory_module(
             transactions, firms, products, prod2idx, prod_graph, module_args, products_to_test=products_to_test)
+        if save_results:
+            with open(f'inventory-corr_{postfix}.pkl', 'wb') as f:
+                pickle.dump(weights, f)
             
     if 'inventory-node2vec' in methods:
         print('\nPredicting production functions with inventory module with node2vec embeddings...')
@@ -406,8 +406,11 @@ def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, 
         print(f'Loaded node2vec embs from node2vec_embs_{postfix}.pkl')
         module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': False,
                        'emb_dim': node2vec_embs.shape[1], 'device': device}
-        test_inventory_module_for_multiple_seeds(num_seeds, transactions, firms, products, prod2idx, 
+        maps, mats = test_inventory_module_for_multiple_seeds(num_seeds, transactions, firms, products, prod2idx, 
             prod_graph, module_args, prod_emb=node2vec_embs, products_to_test=products_to_test)
+        if save_results:
+            with open(f'inventory-node2vec_{postfix}.pkl', 'wb') as f:
+                pickle.dump(mats[np.argmax(maps)], f)
             
     if 'inventory-emb' in methods:
         print('\nPredicting production functions with inventory module with product embeddings...')
@@ -416,14 +419,35 @@ def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, 
             prod_embs, transform = pickle.load(f)
             assert prod_embs.shape[0] == len(products)
             assert transform.shape == (prod_embs.shape[1], prod_embs.shape[1])
+        init_bilinear = transform if dataset == 'sem' else None
+        module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': False,
+                       'emb_dim': prod_embs.shape[1], 'device': device, 'init_bilinear': init_bilinear}
+        maps, mats = test_inventory_module_for_multiple_seeds(num_seeds, transactions, firms, products, prod2idx, 
+            prod_graph, module_args, prod_emb=prod_embs, products_to_test=products_to_test)
+        if save_results:
+            with open(f'inventory-emb_{postfix}.pkl', 'wb') as f:
+                pickle.dump(mats[np.argmax(maps)], f)
+        
+    if 'inventory-tgnpl' in methods:
+        print('\nPredicting production functions with inventory module with TGN-PL product embeddings...')
+        assert os.path.isfile(f'tgnpl_embs_{postfix}.pkl')
+        with open(f'tgnpl_embs_{postfix}.pkl', 'rb') as f:
+            prod_embs = pickle.load(f)
+            assert prod_embs.shape[0] == len(products)
         module_args = {'num_firms': len(firms), 'num_prods': len(products), 'learn_att_direct': False,
                        'emb_dim': prod_embs.shape[1], 'device': device}
-        test_inventory_module_for_multiple_seeds(num_seeds, transactions, firms, products, prod2idx, 
+        maps, mats = test_inventory_module_for_multiple_seeds(num_seeds, transactions, firms, products, prod2idx, 
             prod_graph, module_args, prod_emb=prod_embs, products_to_test=products_to_test)
+        if save_results:
+            with open(f'inventory-tgnpl_{postfix}.pkl', 'wb') as f:
+                pickle.dump(mats[np.argmax(maps)], f)
+        
         
 if __name__ == "__main__":        
     # gridsearch_on_hyperparameters()
 #     transactions, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
 #     train_node2vec_on_firm_product_graph(transactions, firms, products, 'node2vec_embs_sem.pkl')
-    compare_methods_on_data('synthetic', ALL_METHODS, synthetic_type='std', num_seeds=10, gpu=1)
-    
+    # compare_methods_on_data('synthetic', ALL_METHODS, synthetic_type='missing', num_seeds=10, gpu=1)
+    # compare_methods_on_data('sem', ALL_METHODS, num_seeds=10, gpu=1)
+#     compare_methods_on_data('synthetic', ['inventory-node2vec'], synthetic_type='std', num_seeds=10, gpu=4, save_results=True)
+    compare_methods_on_data('sem', ['inventory-emb'], num_seeds=10, gpu=3, save_results=True)
