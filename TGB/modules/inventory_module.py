@@ -17,6 +17,7 @@ class TGNPLInventory(torch.nn.Module):
         device = None,
         learn_att_direct: bool = False,
         init_weights = None,
+        init_bilinear = None,
         trainable: bool = True,
         emb_dim : int = 0,
         seed: int = 0,
@@ -36,6 +37,7 @@ class TGNPLInventory(torch.nn.Module):
         self.seed = seed
         torch.manual_seed(seed)
         self.trainable = trainable
+        self.product_seen = torch.Tensor(np.array(num_prods)).to(bool).to(device)  # which products we've seen in transactions
         if not self.trainable:
             assert (init_weights is not None) and learn_att_direct
             
@@ -52,7 +54,11 @@ class TGNPLInventory(torch.nn.Module):
             else:
                 self.att_weights = init_weights  # no parameters to learn
         else:  # learn attention weights using product embeddings, treat weights as adjustments
-            self.prod_bilinear = Parameter(torch.eye(self.emb_dim, requires_grad=True, device=device))
+            if init_bilinear is not None:
+                print('Received bilinear')
+                self.prod_bilinear = Parameter(torch.Tensor(init_bilinear).to(device))
+            else:
+                self.prod_bilinear = Parameter(torch.eye(self.emb_dim, requires_grad=True, device=device))
             self.adjustments = Parameter(init_weights * 0.01)
                 
     
@@ -60,6 +66,9 @@ class TGNPLInventory(torch.nn.Module):
         """
         Main function: updates inventory based on new transactions and returns inventory loss.
         """
+        assert (prod >= self.num_firms).all()
+        prod = prod - self.num_firms
+        self.product_seen[prod] = True
         unique_timesteps = sorted(torch.unique(t))
         inv_loss = 0
         debt_loss = 0
@@ -68,7 +77,6 @@ class TGNPLInventory(torch.nn.Module):
         for ts in unique_timesteps:
             if ts != self.curr_t:  # we've reached a new timestep
                 self.update_to_new_timestep(ts)
-            
             in_ts = t == ts
             total_supplied_t = self._compute_totals_per_firm_and_product(src[in_ts], prod[in_ts], amt[in_ts])
             total_consumed_t = total_supplied_t @ att_weights
@@ -159,8 +167,6 @@ class TGNPLInventory(torch.nn.Module):
         Take vector of firm IDs and product IDs and return matrix of (n_firms x n_prod),
         indicating totals per pair. Used to get total supplied and total bought.
         """
-        assert (prod_ids >= self.num_firms).all()
-        prod_ids = prod_ids - self.num_firms
         prod_onehot = F.one_hot(prod_ids, num_classes=self.num_prods)
         neg_amt = (amt < 0).sum() / len(amt)
         if neg_amt > 0.01:
@@ -183,6 +189,7 @@ class TGNPLInventory(torch.nn.Module):
             assert prod_emb.shape == (self.num_prods, self.emb_dim), prod_emb.shape
             att_weights = (prod_emb @ (self.prod_bilinear @ prod_emb.T)) + self.adjustments
         att_weights = att_weights * (1-torch.eye(self.num_prods, device=self.device))  # set diagonal to 0
+        att_weights = att_weights * self.product_seen.to(int).reshape(-1, 1)  # set weights to 0 for never-seen products
         return torch.nn.ReLU(inplace=False)(att_weights)  # weights must be non-negative
     
     def _compute_inventory_loss(self, inventory: Tensor, consumption: Tensor):
@@ -209,14 +216,13 @@ def mean_average_precision(prod_graph, prod2idx, pred_mat, verbose=False, return
     """
     if products_to_test is None:
         # can only test on products that appear as dest in prod_graph
-        # leave out products that never appear as source in prod_graph since those are consumer products
-        # and we don't observe firm-firm transactions for them
-        products_to_test = set(prod_graph.dest.values).intersection(set(prod_graph.source.values))
+        products_to_test = set(prod_graph.dest.values)
     if verbose:
         print(f'Computing MAP over {len(products_to_test)} products')
     prod2ap = {}
     for p in products_to_test:
         parts = prod_graph[prod_graph['dest'] == p].source.values
+        assert len(parts) == len(set(parts))  # should be unique
         inputs = [prod2idx[s] for s in parts if s in prod2idx]  # idx of true inputs
         if verbose:
             print(f'Found {len(inputs)} out of {len(parts)} parts for {p}')
