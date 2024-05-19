@@ -26,7 +26,7 @@ from modules.hyper_edgebank import HyperEdgeBankPredictor
 TGB_DIRECTORY = "/".join(str(__file__).split("/")[:-4])
 PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
 
-def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, use_counts=True,
+def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, use_counts=True, use_median=True,
                   use_prev_sampling=False, ns_samples=6):
     """
     Evaluated the dynamic link prediction
@@ -39,13 +39,14 @@ def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, 
         split_mode: specifies whether it is the 'validation' or 'test' set to correctly load the negatives
         edgebank: the fitted HyperEdgeBankPredictor object
         use_counts: whether to use train count or train existence in predict()
+        use_median: whether to use median over mean of edge weights in predict()
     Returns:
         perf_metric: the result of the performance evaluaiton
     """
     perf_list = []  # mean metric per batch
+    perf_list_rmse = [] # mean rmse per batch 
     batch_size = []
     for pos_batch in tqdm(loader):
-        
         pos_src, pos_prod, pos_dst, pos_t, pos_msg = (
             pos_batch.src,
             pos_batch.prod,
@@ -84,9 +85,10 @@ def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, 
             batch_src = torch.cat((torch.unsqueeze(pos_src,-1), neg_src), dim = -1)
             batch_dst = torch.cat((torch.unsqueeze(pos_dst,-1), neg_dst), dim = -1)
             batch_prod = torch.cat((torch.unsqueeze(pos_prod,-1), neg_prod), dim = -1)
-                 
-        y_pred = edgebank.predict(batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten(),
-                                  use_counts=use_counts)
+        
+        # link prediction performance
+        y_pred, _ = edgebank.predict(batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten(),
+                                  use_counts=use_counts, use_median=use_median)
         y_pred = y_pred.reshape(bs, 1+(3*ns_samples))
         input_dict = {
             "y_pred_pos": y_pred[:, :1],
@@ -94,12 +96,22 @@ def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, 
             "eval_metric": [metric]
         }
         perf_list.append(evaluator.eval(input_dict)[metric])
+    
+        # amount prediction performance
+        _, y_amt_pred = edgebank.predict(pos_src.flatten(), pos_dst.flatten(), pos_prod.flatten(),
+                                  use_counts=use_counts, use_median=use_median)
+        y_amt_pred = y_amt_pred.reshape(bs, 1)
+        criterion = torch.nn.MSELoss()
+        rmse = torch.sqrt(criterion(y_amt_pred, pos_msg))
+        perf_list_rmse.append(rmse)
+
         batch_size.append(len(pos_src))
         
     num = (torch.tensor(perf_list) * torch.tensor(batch_size)).sum()
+    num_rmse = (torch.tensor(perf_list_rmse) * torch.tensor(batch_size)).sum()
     denom = torch.tensor(batch_size).sum()
-    perf_metrics = float(num/denom)
-    return perf_metrics
+    perf_metrics, perf_rmse = float(num/denom), float(num_rmse/denom)
+    return perf_metrics, perf_rmse
 
 
 def test_edgebank_on_dataset(args):
@@ -118,6 +130,23 @@ def test_edgebank_on_dataset(args):
     neg_sampler = dataset.negative_sampler
     metric = dataset.eval_metric
     evaluator = Evaluator(name=args.dataset)
+
+    # apply log scaling and standard scaling to edge features    
+    for d in range(data.msg.shape[1]):
+        vals = data.msg[:, d]
+        print(vals)
+        assert (vals >= 0).all()  # if we are logging, all values need to be positive
+        min_val = torch.min(vals[vals > 0])  # minimum value greater than 0
+        vals = torch.clip(vals, min_val, None)  # clip so we don't take log of 0
+        vals = torch.log(vals)  # log scale
+        mean = torch.mean(vals)
+        std = torch.std(vals)
+        if d == 0:  # save so that we can use to scale inventory module caps in get_y_pred 
+            AMT_MEAN = mean
+            AMT_STD = std
+        vals = (vals - mean) / std  # standard scaling
+        data.msg[:, d] = vals
+    print(f"after log scaling, mean={data.msg.mean()}, std={data.msg.std()}") 
     
     train_data = data[dataset.train_mask]
     val_data = data[dataset.val_mask]
@@ -130,22 +159,24 @@ def test_edgebank_on_dataset(args):
     # initialize and fit HyperEdgeBank
     print(f'HyperEdgeBank results on {args.dataset}...')
     edgebank = HyperEdgeBankPredictor(NUM_FIRMS, NUM_PRODUCTS, consecutive=True)
-    edgebank.fit(train_data.src, train_data.dst, train_data.prod)
+    edgebank.fit(train_data.src, train_data.dst, train_data.prod, train_data.msg)
     
     dataset.load_val_ns()  # load validation negative samples
-    val_bin = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=False,
+    val_bin, val_rmse_mean = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=False, use_median=False,
                             use_prev_sampling=args.use_prev_sampling)  # binary on validation set
-    val_cnt = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=True,
+    val_cnt, val_rmse_median = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=True, use_median=True,
                             use_prev_sampling=args.use_prev_sampling)  # count on validation set
-    print(f'Validation set MRRs: binary = {val_bin:0.4f}, count = {val_cnt:0.4f}')
-    
+    print(f'Validation set MRRs: binary = {val_bin:0.4f}, count = {val_cnt:0.4f}; Val set RMSE: {val_rmse_mean: 0.4f}')
+    print(f'Validation set RMSE: mean = {val_rmse_mean: 0.4f}, median = {val_rmse_median: 0.4f}')  
+
     dataset.load_test_ns()  # load test negative samples
-    test_bin = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=False,
+    test_bin, test_rmse_mean = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=False, use_median=False,
                              use_prev_sampling=args.use_prev_sampling)  # binary on test set
-    test_cnt = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=True,
+    test_cnt, test_rmse_median = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=True, use_median=True,
                              use_prev_sampling=args.use_prev_sampling)  # binary on test set
-    print(f'Test set MRRs: binary = {test_bin:0.4f}, count = {test_cnt:0.4f}')  
-    return val_bin, val_cnt, test_bin, test_cnt
+    print(f'Test set MRRs: binary = {test_bin:0.4f}, count = {test_cnt:0.4f}')
+    print(f'Test set RMSE: mean = {test_rmse_mean: 0.4f}, median = {test_rmse_median: 0.4f}')  
+    return val_bin, val_cnt, val_rmse_mean, val_rmse_median, test_bin, test_cnt, test_rmse_mean, test_rmse_median
 
 
 if __name__ == "__main__":
