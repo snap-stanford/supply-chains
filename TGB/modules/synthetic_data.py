@@ -12,8 +12,6 @@ from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import pairwise_distances
 import torch
 
-DATA = 'tgbl-hypergraph_synthetic'
-DATA_DIR = f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{DATA.replace('-', '_')}/"
 
 ###################################################
 # Functions to generate synthetic data
@@ -62,8 +60,8 @@ def make_product_graph(num_exog=5, num_consumer=5, num_inner_layers=4, num_per_l
 
 
 def make_supplier_product_graph(products, layer2prods, prod_pos, seed=0, 
-                                num_layers_in_group=2, num_firms_per_group=20,
-                                min_num_suppliers=3, max_num_suppliers=6):
+                                num_layers_in_group=2, num_firms_per_group=30,
+                                min_num_suppliers=4, max_num_suppliers=8):
     """
     Assign products to supplier firms.
     """
@@ -678,11 +676,10 @@ def measure_temporal_variation_in_triplets(transactions, verbose=False):
     plt.show()
     
     
-def check_negative_sampling(data_name, neg_samples=18, split='val'):
+def check_negative_sampling(data_dir, data_name, neg_samples=18, split='val'):
     """
     Check results from negative sampling.
     """
-    data_dir = f"/lfs/turing1/0/{os.getlogin()}/supply-chains/TGB/tgb/datasets/{data_name.replace('-', '_')}/"
     edgelist_df = pd.read_csv(os.path.join(data_dir, f'{data_name}_edgelist.csv'))
     with open(os.path.join(data_dir, f'{data_name}_{split}_ns.pkl'), 'rb') as f:
         eval_ns = pickle.load(f)

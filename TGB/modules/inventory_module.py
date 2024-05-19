@@ -37,7 +37,6 @@ class TGNPLInventory(torch.nn.Module):
         self.seed = seed
         torch.manual_seed(seed)
         self.trainable = trainable
-        self.product_seen = torch.Tensor(np.array(num_prods)).to(bool).to(device)  # which products we've seen in transactions
         if not self.trainable:
             assert (init_weights is not None) and learn_att_direct
             
@@ -68,7 +67,6 @@ class TGNPLInventory(torch.nn.Module):
         """
         assert (prod >= self.num_firms).all()
         prod = prod - self.num_firms
-        self.product_seen[prod] = True
         unique_timesteps = sorted(torch.unique(t))
         inv_loss = 0
         debt_loss = 0
@@ -189,7 +187,6 @@ class TGNPLInventory(torch.nn.Module):
             assert prod_emb.shape == (self.num_prods, self.emb_dim), prod_emb.shape
             att_weights = (prod_emb @ (self.prod_bilinear @ prod_emb.T)) + self.adjustments
         att_weights = att_weights * (1-torch.eye(self.num_prods, device=self.device))  # set diagonal to 0
-        att_weights = att_weights * self.product_seen.to(int).reshape(-1, 1)  # set weights to 0 for never-seen products
         return torch.nn.ReLU(inplace=False)(att_weights)  # weights must be non-negative
     
     def _compute_inventory_loss(self, inventory: Tensor, consumption: Tensor):
