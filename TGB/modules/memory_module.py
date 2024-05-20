@@ -8,6 +8,7 @@ Reference:
 
 import copy
 from typing import Callable, Dict, Tuple
+import os
 
 import torch
 from torch import Tensor
@@ -205,6 +206,7 @@ class TGNPLMemory(torch.nn.Module):
         last_update = self.last_update[n_id]
         use_init = last_update == -1  # if this node has never been updated, use initial memory
         if self.init_memory_not_learnable:
+            self.init_memory = self.init_memory.to(self.device)
             memory[use_init] = self.init_memory[n_id[use_init]]
         else:
             memory[use_init] = self.init_memory(n_id[use_init])
