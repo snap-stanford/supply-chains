@@ -500,7 +500,6 @@ def parse_args():
     parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
     parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
     parser.add_argument('--node_features_dim', type=int, help='Node features dimension', default=10)
-    parser.add_argument('--num_channels', type=int, help='MLP projection dimension', default=10)
 
     # inventory module parameters
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
@@ -509,6 +508,9 @@ def parse_args():
     parser.add_argument('--att_weights', type=str, help='Saved attention weights for inventory module')
     parser.add_argument('--fix_inventory', action="store_true", help='Treat inventory module as fixed, don\'t update')
     parser.add_argument('--prod_graph', type=str, default=None) # default='synthetic_prod_graph.pkl')
+    parser.add_argument('--debt_penalty', type=float, help='debt penalty', default=5.)
+    parser.add_argument('--consumption_reward', type=float, help='consumption reward', default=4.)
+    parser.add_argument('--adjust_penalty', type=float, help='adjust penalty', default=1.)
     
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
@@ -686,6 +688,9 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         inventory = TGNPLInventory(
             num_firms = num_firms,
             num_prods = num_products,
+            debt_penalty = args.debt_penalty,
+            consumption_reward = args.consumption_reward,
+            adjust_penalty = args.adjust_penalty,
             learn_att_direct = args.learn_att_direct,
             device = device,
             emb_dim = emb_dim,
