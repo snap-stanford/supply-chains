@@ -491,6 +491,7 @@ def parse_args():
     parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
     parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
     parser.add_argument('--weights', type=str, help='Saved weights to initialize model with')
+    parser.add_argument('--init_memory_not_learnable', action="store_true", help='Treat TGNPL memory module as fixed, don\'t update')
     
     # GraphMixer model parameters
     parser.add_argument('--num_layers', type=int, default=2, help='number of model layers')
@@ -614,6 +615,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
                 message_module=TGNPLMessage(data.msg.size(-1), args.mem_dim, args.time_dim),
                 aggregator_module=MeanAggregator(),
                 update_penalty=args.update_penalty,
+                init_memory_not_learnable=args.init_memory_not_learnable,
             ).to(device)
         else:
             assert args.memory_name == 'static'

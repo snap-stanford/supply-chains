@@ -50,6 +50,7 @@ class TGNPLMemory(torch.nn.Module):
         memory_updater_cell: str = "gru",
         update_penalty: float = 1.,
         debug: bool = False,
+        init_memory_not_learnable: bool = False,
     ):
         super().__init__()
         self.num_nodes = num_nodes
@@ -66,6 +67,7 @@ class TGNPLMemory(torch.nn.Module):
         self.time_enc = TimeEncoder(time_dim)
         self.update_penalty = update_penalty
         self.debug = debug
+        self.init_memory_not_learnable = init_memory_not_learnable
         
         if memory_updater_cell == "gru":  # for TGN
             self.memory_updater = GRUCell(message_module.out_channels, memory_dim)
@@ -75,8 +77,11 @@ class TGNPLMemory(torch.nn.Module):
             raise ValueError(
                 "Undefined memory updater!!! Memory updater can be either 'gru' or 'rnn'."
             )
-
-        self.init_memory = Embedding(self.num_nodes, self.memory_dim)  # initial memory
+        if self.init_memory_not_learnable:
+            self.init_memory = torch.zeros(self.num_nodes, self.memory_dim)  # initial memory
+        else:
+            self.init_memory = Embedding(self.num_nodes, self.memory_dim)  # initial memory
+            
         self.register_buffer("memory", torch.empty(self.num_nodes, self.memory_dim))  # current memory
         self.register_buffer("last_update", torch.ones(self.num_nodes, dtype=torch.long).to(self.device) * -1)  # -1 represents no update yet
         self.register_buffer("_assoc", torch.empty(self.num_nodes, dtype=torch.long))            
@@ -101,7 +106,8 @@ class TGNPLMemory(torch.nn.Module):
         if hasattr(self.aggr_module, "reset_parameters"):
             self.aggr_module.reset_parameters()
         self.time_enc.reset_parameters()
-        self.init_memory.reset_parameters()
+        if not self.init_memory_not_learnable:
+            self.init_memory.reset_parameters()
         self.memory_updater.reset_parameters()
         self.reset_state()
 
@@ -198,7 +204,10 @@ class TGNPLMemory(torch.nn.Module):
         memory = self.memory[n_id, :self.memory_dim]
         last_update = self.last_update[n_id]
         use_init = last_update == -1  # if this node has never been updated, use initial memory
-        memory[use_init] = self.init_memory(n_id[use_init])
+        if self.init_memory_not_learnable:
+            memory[use_init] = self.init_memory[n_id[use_init]]
+        else:
+            memory[use_init] = self.init_memory(n_id[use_init])
         
         # Get updated memory
         new_memory = self.memory_updater(aggr, memory.clone())
