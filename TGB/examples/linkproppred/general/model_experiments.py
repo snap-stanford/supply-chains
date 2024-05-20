@@ -207,7 +207,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         no_parts = torch.isclose(caps, neg_ones)  
         assert (caps[~no_parts] >= 0).all()
         skip_amt = to_skip | no_parts | torch.isclose(caps, torch.zeros_like(caps))  # zero suggests incorrect prediction
-        caps = (torch.log(caps)-AMT_MEAN)/AMT_STD  # apply log and standard scaling, -1 will become nan
+        caps[~skip_amt] = (torch.log(caps[~skip_amt])-AMT_MEAN)/AMT_STD  # apply log and standard scaling
         caps = caps.reshape(-1, 1)
         
         if MODEL_NAME == 'INVENTORY':

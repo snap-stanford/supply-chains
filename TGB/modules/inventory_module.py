@@ -115,12 +115,14 @@ class TGNPLInventory(torch.nn.Module):
         inventories = self.inventory[src]
         assert inventories.shape == (len(src), self.num_prods)
         max_amt = inventories / torch.clip(parts_per_prod, 1e-5, None)  # so we don't divide by 0
-        max_val = torch.max(max_amt)
+        multiplier = torch.ones_like(max_amt)
         ispart = parts_per_prod > 0
-        max_amt[~ispart] = max_val  # set to max val so it doesn't affect min
+        max_val = torch.max(max_amt)
+        multiplier[~ispart] = max_val
+        max_amt = max_amt * multiplier  # set non-part to max val so it doesn't affect min
         caps, _ = torch.min(max_amt, dim=1)
         num_parts = (parts_per_prod > 0).sum(axis=1)  # has no parts, exogenous
-        caps[num_parts == 0] = -1
+        caps[num_parts == 0] = -1  # can't make prediction for exogenous product
         return caps
         
     def detach(self):
