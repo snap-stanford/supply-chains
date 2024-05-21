@@ -502,6 +502,7 @@ def parse_args():
     parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
     parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
     parser.add_argument('--node_features_dim', type=int, help='Node features dimension', default=10)
+    parser.add_argument('--num_channels', type=int, help='MLP projection dimension', default=10)
 
     # inventory module parameters
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
