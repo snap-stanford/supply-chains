@@ -281,7 +281,8 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', amt_loss_weight=1, inv_loss_weight=1, 
           update_params=True, ns_samples=6, neg_sampler=None, split_mode="val",
-          num_firms=None, num_products=None, use_prev_sampling=False):
+          num_firms=None, num_products=None, use_prev_sampling=False,
+          include_inventory_penalties=True):
     """
     Training procedure.
     Parameters:
@@ -328,7 +329,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         y_link_pred, y_amt_pred, update_loss = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, ns_samples=ns_samples, neg_sampler=neg_sampler, 
             split_mode=split_mode, num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling,
-            include_inventory=True)
+            include_inventory=include_inventory_penalties)
         assert y_link_pred.size(1) == (3*ns_samples)+1
 
         if loss_name == 'ce-softmax':
@@ -390,7 +391,8 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
-         split_mode="val", metric="mrr", num_firms=None, num_products=None, use_prev_sampling = False):
+         split_mode="val", metric="mrr", num_firms=None, num_products=None, use_prev_sampling=False,
+         include_inventory_penalties=True):
     """
     Evaluation procedure for TGN-PL model.
     Evaluation happens as 'one vs. many', meaning that each positive edge is evaluated against many negative edges
@@ -423,7 +425,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         y_link_pred, y_amt_pred, _ = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, neg_sampler=neg_sampler, split_mode=split_mode,
             num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling, 
-            include_inventory=True)
+            include_inventory=include_inventory_penalties)
 #         print(y_link_pred.sum(axis=0))
         input_dict = {
             "y_pred_pos": y_link_pred[:, :1],
@@ -508,6 +510,7 @@ def parse_args():
     parser.add_argument('--att_weights', type=str, help='Saved attention weights for inventory module')
     parser.add_argument('--fix_inventory', action="store_true", help='Treat inventory module as fixed, don\'t update')
     parser.add_argument('--prod_graph', type=str, default=None) # default='synthetic_prod_graph.pkl')
+    parser.add_argument('--skip_inventory_penalties', action='store_true', help='Whether to skip inventory penalties on link / amount prediction')
     
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
@@ -678,7 +681,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         if args.att_weights is not None:
             with open(args.att_weights, 'rb') as f:
                 att_weights = pickle.load(f)
-            print(f'Initializing inventory module with {args.att_weights} (trainable = {not args.fix_inventory})')
+            print(f'Initializing inventory module with {args.att_weights} (trainable = {not args.fix_inventory}, applying link prediction penalties = {not args.skip_inventory_penalties})')
         else:
             att_weights = None
         inventory = TGNPLInventory(
@@ -876,6 +879,7 @@ def run_experiment(args):
         test_amt_perf_list = []
         
         start_train_val = timeit.default_timer()
+        include_inv_penalties = (not args.skip_inventory_penalties)
         for epoch in range(1, args.num_epoch + 1):
             # train
             start_epoch_train = timeit.default_timer()
@@ -884,7 +888,8 @@ def run_experiment(args):
                 dataset.load_val_ns()  # load val negative samples
                 loss_dict = train(model, opt, neighbor_loader, data, val_loader, device, 
                     neg_sampler=neg_sampler, split_mode="val", use_prev_sampling=args.use_prev_sampling,
-                    inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None))
+                    inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None),
+                    include_inventory_penalties=include_inv_penalties)
                 # reset for beginning of val
                 neighbor_loader.reset_state()
                 if MODEL_NAME == 'TGNPL':
@@ -896,11 +901,13 @@ def run_experiment(args):
                 dataset.load_train_ns()  # load train negative samples
                 loss_dict = train(model, opt, neighbor_loader, data, train_loader, device, 
                     neg_sampler=neg_sampler, split_mode="train", use_prev_sampling=args.use_prev_sampling,
-                    inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None))
+                    inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None),
+                    include_inventory_penalties=include_inv_penalties)
                 # Don't reset since val is a continuation of train
             else:
                 loss_dict = train(model, opt, neighbor_loader, data, train_loader, device,
-                    inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None))
+                    inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None),
+                    include_inventory_penalties=include_inv_penalties)
                 # Don't reset since val is a continuation of train
             if 'inventory' in model:
                 model['inventory'].update_to_new_timestep()  # train ends at the end of t
@@ -922,7 +929,8 @@ def run_experiment(args):
             start_val = timeit.default_timer()
             dataset.load_val_ns()  # load val negative samples
             val_dict = test(model, neighbor_loader, data, val_loader, neg_sampler, evaluator,
-                            device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling)
+                            device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling,
+                            include_inventory_penalties=include_inv_penalties)
             if 'inventory' in model:
                 model['inventory'].update_to_new_timestep()  # val ends at the end of t
             print(f"\tValidation {metric}: {val_dict['link_pred']:.4f}, RMSE: {val_dict['amount_pred']:.4f}")
@@ -931,7 +939,6 @@ def run_experiment(args):
             time_val = timeit.default_timer() - start_val
             print(f"\tValidation: Elapsed time (s): {time_val: .4f}")
                 
-            
             # log metrics
             log_dict = loss_dict.copy()
             log_dict[f'val_link_pred_{metric}'] = val_dict['link_pred']
@@ -948,7 +955,8 @@ def run_experiment(args):
                 start_test = timeit.default_timer()
                 dataset.load_test_ns()  # load test negative samples
                 test_dict = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
-                                       device, split_mode="test", metric=metric, use_prev_sampling=args.use_prev_sampling)
+                                 device, split_mode="test", metric=metric, use_prev_sampling=args.use_prev_sampling,
+                                 include_inventory_penalties=include_inv_penalties)
                 time_test = timeit.default_timer() - start_test
                 print(f"\tTest {metric}: {test_dict['link_pred']:.4f}, RMSE: {test_dict['amount_pred']:.4f}")
                 print(f"\tTest: Elapsed time (s): {time_test: .4f}")
