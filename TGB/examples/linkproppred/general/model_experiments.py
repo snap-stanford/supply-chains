@@ -493,6 +493,7 @@ def parse_args():
     parser.add_argument('--time_dim', type=int, help='Time dimension', default=100)
     parser.add_argument('--update_penalty', type=float, help='Regularization of TGNPL memory updates by penalizing change in memory', default=1)
     parser.add_argument('--weights', type=str, help='Saved weights to initialize model with')
+    parser.add_argument('--init_memory_not_learnable', action="store_true", help='Treat TGNPL memory module as fixed, don\'t update')
     
     # GraphMixer model parameters
     parser.add_argument('--num_layers', type=int, default=2, help='number of model layers')
@@ -501,7 +502,6 @@ def parse_args():
     parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
     parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
     parser.add_argument('--node_features_dim', type=int, help='Node features dimension', default=10)
-    parser.add_argument('--num_channels', type=int, help='MLP projection dimension', default=10)
 
     # inventory module parameters
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
@@ -511,6 +511,9 @@ def parse_args():
     parser.add_argument('--fix_inventory', action="store_true", help='Treat inventory module as fixed, don\'t update')
     parser.add_argument('--prod_graph', type=str, default=None) # default='synthetic_prod_graph.pkl')
     parser.add_argument('--skip_inventory_penalties', action='store_true', help='Whether to skip inventory penalties on link / amount prediction')
+    parser.add_argument('--debt_penalty', type=float, help='debt penalty', default=5.)
+    parser.add_argument('--consumption_reward', type=float, help='consumption reward', default=4.)
+    parser.add_argument('--adjust_penalty', type=float, help='adjust penalty', default=1.)
     
     # training parameters
     parser.add_argument('--num_epoch', type=int, help='Number of epochs', default=100)
@@ -617,6 +620,7 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
                 message_module=TGNPLMessage(data.msg.size(-1), args.mem_dim, args.time_dim),
                 aggregator_module=MeanAggregator(),
                 update_penalty=args.update_penalty,
+                init_memory_not_learnable=args.init_memory_not_learnable,
             ).to(device)
         else:
             assert args.memory_name == 'static'
@@ -687,6 +691,9 @@ def set_up_model(args, data, device, num_firms=None, num_products=None):
         inventory = TGNPLInventory(
             num_firms = num_firms,
             num_prods = num_products,
+            debt_penalty = args.debt_penalty,
+            consumption_reward = args.consumption_reward,
+            adjust_penalty = args.adjust_penalty,
             learn_att_direct = args.learn_att_direct,
             device = device,
             emb_dim = emb_dim,
