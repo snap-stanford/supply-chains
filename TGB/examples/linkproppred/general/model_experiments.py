@@ -1009,7 +1009,8 @@ def run_experiment(args):
             start_test = timeit.default_timer()
             test_dict = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
                                     device, split_mode="test", metric=metric, 
-                                    use_prev_sampling=args.use_prev_sampling)
+                                    use_prev_sampling=args.use_prev_sampling,
+                                    include_inventory_penalties=include_inv_penalties)
             save_results({'model': MODEL_NAME,
                   'data': args.dataset,
                   'run': run_idx,
