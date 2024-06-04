@@ -250,11 +250,11 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
     Helper function to get current embeddings for all products.
     """
     assert MODEL_NAME in {'TGNPL', 'GRAPHMIXER'}
+    f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
+    p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
     if MODEL_NAME == 'TGNPL':
         # Helper vector to map global node indices to local ones
         assoc = torch.empty(num_firms+num_products, dtype=torch.long, device=device)
-        f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
-        p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
         n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
         assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
         memory, last_update, update_loss = model['memory'](n_id)
@@ -267,14 +267,15 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
         )
         prod_embs = z[assoc[p_id]]
     else:
-        src, prod, dst, t, msg = data.src, data.prod, data.dst, data.t, data.msg
-        src_node_embeddings, dst_node_embeddings, prod_node_embeddings = \
-                model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
-                                                                                  dst_node_ids=dst,
-                                                                                  prod_node_ids=prod,
+        t = torch.full(p_id.shape, model['inventory'].curr_t, device=device).long()
+        not_used_id = torch.zeros_like(p_id)
+        _, _, prod_node_embeddings = \
+                model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=not_used_id,
+                                                                                  dst_node_ids=not_used_id,
+                                                                                  prod_node_ids=p_id,
                                                                                   node_interact_times=t,
                                                                                   neighbor_loader=neighbor_loader)
-        prod_embs = prod_node_embeddings # TODO: check if this is prob_embs for graphmixer? 
+        prod_embs = prod_node_embeddings
     return prod_embs
 
     
