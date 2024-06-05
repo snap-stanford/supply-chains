@@ -1,10 +1,9 @@
 """
-this file morphs the transaction-level data into the TGB hypergraph format, including the edge list, sampled negatives 
+this file morphs the transaction-level data into the hypergraph format, including the edge list, sampled negatives 
 for the train/val/test splits, and supplementary metadata (e.g., mapping fom node IDs to firm & product names). 
 
-SAMPLE USAGE (from root directory of repo):
+<SAMPLE USAGE>
 python register_data/register_hypergraph.py --ARGS
-
 """
 
 import pandas as pd
@@ -24,7 +23,7 @@ def get_args():
     parser.add_argument('dir', help = "directory to save data")
     parser.add_argument('--sample_train', action='store_true', help = "if true, also sample negatives for train")
     parser.add_argument('--skip_process_csv', action='store_true', help = "if true, use already processed edgelist")
-    parser.add_argument('--csv_file', nargs='?', default = "../hitachi-supply-chains/temporal_graph/storage/daily_transactions_2021.csv", help = "path to CSV file with transactions")
+    parser.add_argument('--csv_file', nargs='?', default = "./TGB/tgb/datasets/tgbl_hypergraph_tesla/tesla_transactions.csv", help = "path to CSV file with transactions")
     parser.add_argument('--metric', nargs='?', default = "total_amount", help = "either total amount (in USD), which is default, or weight")
     parser.add_argument('--logscale', action='store_true', help = "if true, apply logarithm to edge weights")
     parser.add_argument('--use_prev_sampling', action='store_true', help = "if true, use the hyperedge sampling approach prior to fixing loose negatives on Oct 24")
@@ -374,6 +373,7 @@ if __name__ == "__main__":
                "train_max_ts": int(train_max_ts), "val_max_ts": int(val_max_ts), "test_max_ts": int(test_max_ts)}
         json.dump(meta, file, indent = 4)
     
+
 
 
 

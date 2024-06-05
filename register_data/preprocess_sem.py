@@ -2,7 +2,7 @@
 for pre-processing the sem.csv file, which contains transactions related to 
 the SEM supply-chain; will output a separate, timestamp-aggregated CSV file 
 afterward, run the register_hypergraph.py program to crystallize the SEM
-data into files compatible with TGN / TGN-PL model training
+data into files compatible with SC-TGN, SC-GRAPHMIXER model training
 
 <SAMPLE USAGE>
 python register_data/preprocess_sem.py --sem_filepath ./sem.csv --out_filepath    
@@ -20,9 +20,9 @@ SEM_CODES = [901210, 902780, 903141]
 
 def get_args():
     parser = argparse.ArgumentParser(description='Extracting hypergraph from the SEM dataset')
-    parser.add_argument('--start_date', help='Starting day of form YY-MM-DD from which to collect data', default = "2019-01-01")
-    parser.add_argument('--end_date', help='Ending day of form YY-MM-DD from which to collect data', default = "2024-02-19")
-    parser.add_argument('--length_timestamps', help='Number of days to aggregate per time stamp', default = 1, type = int)
+    parser.add_argument('--start_date', help='Starting day of form YY-MM-DD from which to collect data', default = "2023-01-01")
+    parser.add_argument('--end_date', help='Ending day of form YY-MM-DD from which to collect data', default = "2023-12-31")
+    parser.add_argument('--length_timestamps', help='Number of days to aggregate per time stamp', default = 7, type = int)
     parser.add_argument('--sem_filepath', help='Path to the .csv file that contains the SEM supply-chain transactions', default = None)
     parser.add_argument('--out_filepath', help='Path to the .csv file for storing the resulting data', default = None)
     parser.add_argument('--use_titles', help = 'if provided, data uses company titles instead of IDs', action='store_true')
@@ -66,8 +66,8 @@ def get_company_idname_map(df):
 
     return company_id2name_final
   
-def preprocess_sem(df, start_date = "2019-01-01", end_date = "2024-02-19", use_titles = True, id2company = None,
-                   length_timestamps = 1, date_format = '%Y-%m-%d', only_sem_suppliers=False):
+def preprocess_sem(df, start_date = "2023-01-01", end_date = "2023-12-31", use_titles = True, id2company = None,
+                   length_timestamps = 7, date_format = '%Y-%m-%d', only_sem_suppliers=False):
     #select dates of interest
     start_date_dt = datetime.datetime.strptime(start_date, date_format)
     end_date_dt = datetime.datetime.strptime(end_date, date_format)
@@ -154,3 +154,4 @@ if __name__ == "__main__":
     print("Saved out {} transactions to {}!".format(len(df_sem), args.out_filepath))
     print(df_sem.head(5))
     print(df_sem.tail(5))
+
