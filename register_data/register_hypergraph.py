@@ -77,9 +77,6 @@ def partition_edges(df, train_max_ts, val_max_ts, test_max_ts):
             E_test[ts].append(edge)
     return E_train, E_val, E_test
 
-def count_node_matches(edge1, edge2):
-    return sum([edge1[j] == edge2[j] for j in range(len(edge1))])
-
 def sample_from_list_of_triplets(l, k, p_vals=None):
     """
     Can't directly call np.random.choice on list since that function only works with 1d arrays.
@@ -112,79 +109,6 @@ def convert_index_to_triplet(idx):
     prod = idx % NUM_PRODS
     prod = prod + NUM_FIRMS
     return src, dst, prod
-
-def get_links_dict(temporal_edges, isTrain = False): #prepare to relax the condition a bit
-    link_map, second_order_map, list_of_edges = {}, {}, []
-    for ts, edges in temporal_edges.items():
-        for source, product, target in edges: 
-            source_key = (-1, product, target) #complete the source
-            product_key = (source, -1, target)
-            target_key = (source, product, -1)
-
-            for primary_key, tail_node in zip([source_key, product_key, target_key],
-                                        [source, product, target]):
-                if primary_key in link_map:
-                    link_map[primary_key].add(tail_node)
-                else:
-                    link_map[primary_key] = {tail_node}
-                    
-            if (isTrain == True):        
-                source_key_same_target = (-1, -2, target)
-                source_key_same_product = (-1, product, -2)
-                product_key_same_source = (source, -1, -2)
-                product_key_same_target = (-2, -1, target)
-                target_key_same_source = (source, -2, -1)
-                target_key_same_product = (-2, product, -1)
-
-                for secondary_key, tail_node in zip([source_key_same_target, source_key_same_product,
-                                                    product_key_same_source, product_key_same_target,
-                                                    target_key_same_source, target_key_same_product],
-                                                    [source, source, product, product, target, target]):
-                    if secondary_key in second_order_map:
-                        second_order_map[secondary_key].add(tail_node)
-                    else:
-                        second_order_map[secondary_key] = {tail_node}
-                
-            list_of_edges.append((source, product, target, ts))
-
-    return link_map, second_order_map, list_of_edges
-
-def search_map(map, key):
-    if (key in map):
-        return map[key]
-    return set()
-
-def get_eval_negative_links(E_train, E_eval, split = "val"): #E_eval among {E_val, E_test}
-    train_links, second_links, _ = get_links_dict(E_train, True)
-    eval_ns_links, eval_ns_keys = {}, []
-    print("Processing Through {} Links ...".format(split.capitalize()))
-    for ts in tqdm(E_eval):
-        eval_ns_links[ts] = {}
-        eval_links_map, _, eval_edges = get_links_dict({ts: E_eval[ts]}, False)
-        eval_ns_keys.extend(eval_edges)
-
-        for incomplete_link, positive_completions in eval_links_map.items():
-            hist_completions = search_map(train_links, incomplete_link).difference(positive_completions)
-
-            source, product, target = incomplete_link
-            if (source == -1): #corrupted source
-                shared_target, shared_product = (-1, -2, target), (-1, product, -2)
-                second_completions = search_map(second_links, shared_target).union(
-                    search_map(second_links, shared_product)).difference(positive_completions)
-            elif (product == -1): #corrupted product
-                shared_source, shared_target = (source, -1, -2), (-2, -1, target)
-                second_completions = search_map(second_links, shared_source).union(
-                    search_map(second_links, shared_target)).difference(positive_completions)
-            else: #corrupted target
-                shared_source, shared_product = (source, -2, -1), (-2, product, -1)
-                second_completions = search_map(second_links, shared_source).union(
-                    search_map(second_links, shared_product)).difference(positive_completions)
-            
-            second_completions = second_completions.difference(hist_completions)
-            eval_ns_links[ts][incomplete_link] = {"hist": hist_completions,
-                                                  "second_hist": second_completions,
-                                                  "positive": positive_completions} 
-    return eval_ns_links, eval_ns_keys
 
 def edge_sampler_wrapper(split): #returns an edge sampler function for either the train, val, or test split 
     global edge_sampler
@@ -323,6 +247,7 @@ if __name__ == "__main__":
                "train_max_ts": int(train_max_ts), "val_max_ts": int(val_max_ts), "test_max_ts": int(test_max_ts)}
         json.dump(meta, file, indent = 4)
     
+
 
 
 
