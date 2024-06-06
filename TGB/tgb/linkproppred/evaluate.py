@@ -7,8 +7,6 @@ from sklearn.metrics import *
 import math
 from tgb.utils.info import DATA_EVAL_METRIC_DICT
 
-
-
 try:
     import torch
 except ImportError:
@@ -76,9 +74,7 @@ class Evaluator(object):
     def _eval_hits_and_mrr(self, y_pred_pos, y_pred_neg, type_info, k_value):
         r"""
         compute hist@k and mrr
-        reference:
-            - https://github.com/snap-stanford/ogb/blob/d5c11d91c9e1c22ed090a2e0bbda3fe357de66e7/ogb/linkproppred/evaluate.py#L214
-        
+
         Parameters:
             y_pred_pos: positive predicted scores
             y_pred_neg: negative predicted scores
