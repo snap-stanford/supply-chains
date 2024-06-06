@@ -144,11 +144,6 @@ class LastNeighborLoaderTime:
         t_id[mask] = EMPTY_VALUE
         msg[mask] = EMPTY_VALUE
 
-        # Relabel node indices. # NOT NEEDED IN THIS VERSION
-        # nodes = n_id.view(-1, 1).repeat(1, self.size)
-        # n_id = torch.cat([n_id.unique(), neighbors.unique()]).unique()
-        # self._assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
-        # neighbors, nodes = self._assoc[neighbors], self._assoc[nodes]
         return neighbors, None, e_id, t_id, msg
 
     def insert(self, src: Tensor, dst: Tensor, t: Tensor, msg: Tensor):
@@ -202,7 +197,6 @@ class LastNeighborLoaderTime:
             [self.neighbors[n_id, : self.size], dense_neighbors], dim=-1
         )
 
-        # TODO: should be e_id != -1 then largest timestamp goes first 
         # Sort by time in graphmixer to load most recent neighbors
         # And sort them based on `t_id`, used to be based on `e_id` for TGNPL
         e_id, perm = e_id.topk(self.size, dim=-1) # returns the largest elements 
@@ -224,9 +218,6 @@ class LastNeighborLoaderGraphmixer(LastNeighborLoaderTime):
     def __init__(self, num_nodes: int, num_neighbors: int, time_gap: int, edge_feat_dim: int, device=None):
         super().__init__(num_nodes, num_neighbors, time_gap, edge_feat_dim, device) 
 
-    # def __call__(self, f_id: Tensor, p_id: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        # n_id = torch.cat([f_id, p_id])
-        # return super().__call__(n_id)
     def __call__(self, n_id: Tensor, size: int) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         return super().__call__(n_id, size)
 
@@ -234,5 +225,6 @@ class LastNeighborLoaderGraphmixer(LastNeighborLoaderTime):
         for i in range(src.size()[0]):  
             super().insert(src[i:i+1], prod[i:i+1], t[i:i+1], msg[i:i+1])
             super().insert(dst[i:i+1], prod[i:i+1], t[i:i+1], msg[i:i+1])
+
     def reset_state(self):
         return super().reset_state()

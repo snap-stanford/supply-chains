@@ -12,8 +12,7 @@ class GraphMixer(nn.Module):
                  num_tokens: int, num_channels: int = 10, num_layers: int = 2, 
                  node_raw_features: torch.Tensor = None, node_feat_dim: int = 100,
                  token_dim_expansion_factor: float = 0.5, channel_dim_expansion_factor: float = 4.0, 
-                 dropout: float = 0.1, time_gap: int = 2000, 
-                 debug: bool=False, mimic_static_debug: bool=False): # TODO: delete debug flag
+                 dropout: float = 0.1, time_gap: int = 2000): 
         """
         GraphMixer model.
                                 
@@ -26,8 +25,6 @@ class GraphMixer(nn.Module):
         :param channel_dim_expansion_factor: float, dimension expansion factor for channels
         :param dropout: float, dropout rate
         :param time_gap: number of neighbors to load per node when constructing node features
-        :param debug: print when debugging
-        :param mimic_static_debug: construct graphmixer similar to tgnpl static when debugging
         """
         super(GraphMixer, self).__init__()
         self.num_nodes = num_nodes
@@ -48,8 +45,6 @@ class GraphMixer(nn.Module):
         self.dropout = dropout
         self.num_neighbors = num_tokens
         self.time_gap = time_gap
-        self.debug = debug
-        self.mimic_static_debug = mimic_static_debug # TODO: delete debug flag
 
         # in GraphMixer, the time encoding function is not trainable
         self.time_encoder = TimeEncoder(time_dim=time_feat_dim, parameter_requires_grad=False)
@@ -106,16 +101,10 @@ class GraphMixer(nn.Module):
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim)
         nodes_edge_raw_features = neighbor_edge_features
         # Tensor, shape (batch_size, num_neighbors, time_feat_dim)
-        if self.debug:
-            print("node_interact_times (shape, value)", node_interact_times[:, None].shape, node_interact_times[:, None])
-            print("neighbor_times (shape, value)", neighbor_times.shape, neighbor_times)
-            print("input to time encoder", node_interact_times[:, None] - neighbor_times)
         nodes_neighbor_time_features = self.time_encoder(timestamps=(node_interact_times[:, None] - neighbor_times).float())
 
         # ndarray, set the time features to all zeros for the padded timestamp
         nodes_neighbor_time_features[neighbor_node_ids == EMPTY_VALUE] = 0.0
-        if self.debug:
-            print("output of time encoder (zeroed out if applicable)", nodes_neighbor_time_features.shape, nodes_neighbor_time_features)
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim + time_feat_dim)
         combined_features = torch.cat([nodes_edge_raw_features, nodes_neighbor_time_features], dim=-1)
@@ -133,9 +122,6 @@ class GraphMixer(nn.Module):
         # get temporal neighbors of nodes, including neighbor ids
         # time_gap_neighbor_node_ids, ndarray, shape (batch_size, time_gap)
         time_gap_neighbor_node_ids, _, _, _, _ = self.neighbor_sampler(n_id=node_ids, size=self.time_gap)
-#         time_gap_neighbor_node_ids = neighbor_node_ids # Here's a simplified version that assumes args.time_gap == args.num_neighbors
-        if self.debug:
-            print("time_gap_neighbor_node_ids (shape, value)", time_gap_neighbor_node_ids.shape, time_gap_neighbor_node_ids)
 
         # Tensor, shape (batch_size, time_gap, node_feat_dim)
         nodes_time_gap_neighbor_node_raw_features = self.node_raw_features[time_gap_neighbor_node_ids]
@@ -152,15 +138,10 @@ class GraphMixer(nn.Module):
 
         # Tensor, shape (batch_size, node_feat_dim), average over the time_gap neighbors
         nodes_time_gap_neighbor_node_agg_features = torch.mean(nodes_time_gap_neighbor_node_raw_features * scores.unsqueeze(dim=-1), dim=1)
-        if self.debug:
-            print("print nodes_time_gap_neighbor_node_agg_features (expect the same across axis=0 for empty graph)", nodes_time_gap_neighbor_node_agg_features)
 
         # Tensor, shape (batch_size, node_feat_dim), add features of nodes in node_ids
         output_node_features = nodes_time_gap_neighbor_node_agg_features + self.node_raw_features[node_ids]
         
-        if self.mimic_static_debug:
-            output_node_features = self.node_raw_features[node_ids]
-    
         # Tensor, shape (batch_size, node_feat_dim)
         node_embeddings = self.output_layer(torch.cat([combined_features, output_node_features], dim=1))
         return node_embeddings
@@ -274,33 +255,3 @@ class TimeEncoder(nn.Module):
         output = torch.cos(self.w(timestamps))
 
         return output
-
-# class MergeLayer(nn.Module):
-
-#     def __init__(self, input_dim1: int, input_dim2: int, input_dim3: int, hidden_dim: int, output_dim: int):
-#         """
-#         Merge Layer to merge two inputs via: input_dim1 + input_dim2 + input_dim3 -> hidden_dim -> output_dim.
-#         :param input_dim1: int, dimension of first input
-#         :param input_dim2: int, dimension of the second input
-#         :param input_dim3: int, dimension of the third input
-#         :param hidden_dim: int, hidden dimension
-#         :param output_dim: int, dimension of the output
-#         """
-#         super().__init__()
-#         self.fc1 = nn.Linear(input_dim1 + input_dim2 + input_dim3, hidden_dim)
-#         self.fc2 = nn.Linear(hidden_dim, output_dim)
-#         self.act = nn.ReLU()
-
-#     def forward(self, input_1: torch.Tensor, input_2: torch.Tensor, input_3: torch.Tensor):
-#         """
-#         merge and project the inputs
-#         :param input_1: Tensor, shape (*, input_dim1)
-#         :param input_2: Tensor, shape (*, input_dim2)
-#         :param input_3: Tensor, shape (*, input_dim3)
-#         :return:
-#         """
-#         # Tensor, shape (*, input_dim1 + input_dim2 + input_dim3)
-#         x = torch.cat([input_1, input_2, input_3], dim=1)
-#         # Tensor, shape (*, output_dim)
-#         h = self.fc2(self.act(self.fc1(x)))
-#         return h
