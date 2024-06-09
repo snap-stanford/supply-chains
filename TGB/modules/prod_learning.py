@@ -445,9 +445,10 @@ def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, 
         
 if __name__ == "__main__":        
     # gridsearch_on_hyperparameters()
-#     transactions, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
-#     train_node2vec_on_firm_product_graph(transactions, firms, products, 'node2vec_embs_sem.pkl')
+    # transactions, firms, firm2idx, products, prod2idx, prod_graph = load_SEM_data()
+    # train_node2vec_on_firm_product_graph(transactions, firms, products, 'node2vec_embs_sem.pkl')
     # compare_methods_on_data('synthetic', ALL_METHODS, synthetic_type='missing', num_seeds=10, gpu=1)
     # compare_methods_on_data('sem', ALL_METHODS, num_seeds=10, gpu=1)
-#     compare_methods_on_data('synthetic', ['inventory-node2vec'], synthetic_type='std', num_seeds=10, gpu=4, save_results=True)
+    # compare_methods_on_data('synthetic', ['inventory-node2vec'], synthetic_type='std', num_seeds=10, gpu=4, save_results=True)
+    # compare_methods_on_data('sem', ['inventory-emb'], num_seeds=10, gpu=3, save_results=True)
     compare_methods_on_data('sem', ['inventory-emb'], num_seeds=10, gpu=3, save_results=True)
