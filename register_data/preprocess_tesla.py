@@ -1,15 +1,12 @@
 """
 for pre-processing the tesla.csv file, which contains transactions related to the Tesla
 Electric Vehicle (EV) supply-chain; will output a separate, timestamp-aggregated CSV file 
-
 afterward, run the register_hypergraph.py program to crystallize the Tesla
-data into files compatible with TGN / TGN-PL model training
+data into files compatible with SC-TGN, SC-GRAPHMIXER model training
 
 <SAMPLE USAGE>
 python register_data/preprocess_tesla.py --tesla_filepath ./tesla.csv --out_filepath    
      ./tesla_transactions.csv --use_titles
-
-Note: might take ~ 30 seconds to a minute to complete
 """
 
 import pandas as pd

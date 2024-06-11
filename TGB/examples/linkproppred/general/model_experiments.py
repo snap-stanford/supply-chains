@@ -17,7 +17,6 @@ import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn import Linear
 
-from torch_geometric.datasets import JODIEDataset
 from torch_geometric.loader import TemporalDataLoader
 
 from torch_geometric.nn import TransformerConv
@@ -42,7 +41,7 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper, TimeSpecif
 # ===========================================
 def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                          ns_samples=6, neg_sampler=None, split_mode="val",
-                         num_firms=None, num_products=None, use_prev_sampling=False,
+                         num_firms=None, num_products=None,
                          include_inventory=True):
     """
     Get model scores for a batch's positive edges and its corresponding negative samples.
@@ -58,8 +57,6 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         split_mode: in ['val', 'test'], used for neg_sampler
         num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
-        use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
-                            (that is, without correction to the loose negatives on Oct 24)
         include_inventory: whether to include the inventory module 
     Returns:
         y_link_pred: shape is (batch size) x (1 + 3*ns_samples)
@@ -101,18 +98,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
             (bs, ns_samples),
             dtype=torch.long,
             device=device,
-        )
-
-    elif use_prev_sampling: # not supported by graphmixer
-        #using the negative sampling procedure prior to Oct 24 (no loose negatives)
-        neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
-        assert len(neg_batch_list) == bs
-        neg_batch_list = torch.Tensor(neg_batch_list)
-        ns_samples = neg_batch_list.size(1) // 3  # num negative samples per src/prod/dst
-        neg_src = neg_batch_list[:, :ns_samples]   # we assume neg batch is ordered by neg_src, neg_prod, neg_dst
-        neg_prod = neg_batch_list[:, ns_samples:(2*ns_samples)]  
-        neg_dst = neg_batch_list[:, (2*ns_samples):]  
-        
+        )   
     else:
         #using the current negative sampling for hypergraph
         neg_batch_list = neg_sampler.query_batch(pos_src, pos_dst, pos_prod, pos_t, split_mode=split_mode)
@@ -126,7 +112,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         batch_dst = torch.cat((torch.unsqueeze(pos_dst,-1), neg_dst), dim = -1)
         batch_prod = torch.cat((torch.unsqueeze(pos_prod,-1), neg_prod), dim = -1)
         
-    if (neg_sampler is None or use_prev_sampling):
+    if neg_sampler is None:
         num_samples = (3*ns_samples)+1  # total num samples per data point
         batch_src = pos_src.reshape(bs, 1).repeat(1, num_samples)  # [[src1, src1, ...], [src2, src2, ...]]
         batch_src[:, 1:ns_samples+1] = neg_src  # replace pos_src with negatives
@@ -166,7 +152,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
             y_link_pred = model['link_pred'](batch_src_node_embeddings,
                                              batch_dst_node_embeddings,
                                              batch_prod_node_embeddings).squeeze(dim=-1).reshape(bs, num_samples)
-            update_loss = 0 # TODO: is this true? 
+            update_loss = 0
         if 'amount_pred' in model:
             if MODEL_NAME == 'TGNPL':
                 y_amt_pred = model['amount_pred'](z[assoc[pos_src]], z[assoc[pos_dst]], z[assoc[pos_prod]])
@@ -250,11 +236,11 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
     Helper function to get current embeddings for all products.
     """
     assert MODEL_NAME in {'TGNPL', 'GRAPHMIXER'}
+    f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
+    p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
     if MODEL_NAME == 'TGNPL':
         # Helper vector to map global node indices to local ones
         assoc = torch.empty(num_firms+num_products, dtype=torch.long, device=device)
-        f_id = torch.Tensor([]).long().to(device)  # we only need embeddings for products, not firms
-        p_id = torch.arange(num_firms, num_firms+num_products, device=device).long()  # all product IDs
         n_id, edge_index, e_id = neighbor_loader(f_id, p_id)  # n_id contains p_id and its neighbors
         assoc[n_id] = torch.arange(n_id.size(0), device=device)  # maps original ID to row in z
         memory, last_update, update_loss = model['memory'](n_id)
@@ -267,21 +253,22 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
         )
         prod_embs = z[assoc[p_id]]
     else:
-        src, prod, dst, t, msg = data.src, data.prod, data.dst, data.t, data.msg
-        src_node_embeddings, dst_node_embeddings, prod_node_embeddings = \
-                model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
-                                                                                  dst_node_ids=dst,
-                                                                                  prod_node_ids=prod,
+        t = torch.full(p_id.shape, model['inventory'].curr_t, device=device).long()
+        not_used_id = torch.zeros_like(p_id)
+        _, _, prod_node_embeddings = \
+                model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=not_used_id,
+                                                                                  dst_node_ids=not_used_id,
+                                                                                  prod_node_ids=p_id,
                                                                                   node_interact_times=t,
                                                                                   neighbor_loader=neighbor_loader)
-        prod_embs = prod_node_embeddings # TODO: check if this is prob_embs for graphmixer? 
+        prod_embs = prod_node_embeddings
     return prod_embs
 
     
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', amt_loss_weight=1, inv_loss_weight=1, 
           update_params=True, ns_samples=6, neg_sampler=None, split_mode="val",
-          num_firms=None, num_products=None, use_prev_sampling=False,
+          num_firms=None, num_products=None,
           include_inventory_penalties=True):
     """
     Training procedure.
@@ -299,8 +286,6 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
         split_mode: in ['val', 'test'], used for neg_sampler
         num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
-        use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
-                            (that is, without correction to the loose negatives on Oct 24)
     Returns:
         total loss, logits loss (from dynamic link prediction), inventory loss, memory update loss
     """
@@ -328,7 +313,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             
         y_link_pred, y_amt_pred, update_loss = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, ns_samples=ns_samples, neg_sampler=neg_sampler, 
-            split_mode=split_mode, num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling,
+            split_mode=split_mode, num_firms=num_firms, num_products=num_products,
             include_inventory=include_inventory_penalties)
         assert y_link_pred.size(1) == (3*ns_samples)+1
 
@@ -391,7 +376,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
-         split_mode="val", metric="mrr", num_firms=None, num_products=None, use_prev_sampling=False,
+         split_mode="val", metric="mrr", num_firms=None, num_products=None, 
          include_inventory_penalties=True):
     """
     Evaluation procedure for TGN-PL model.
@@ -409,8 +394,6 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         metric: in ['mrr', 'hits@'], which metric to use in evaluator
         num_firms: total number of firms. Assumed that firm indices are [0 ... num_firms-1].
         num_products: total number of products. Assumed that product indices are [num_firms ... num_products+num_firms-1].
-        use_prev_sampling: whether the negative hyperedges were sampled using the prior negative sampling process
-                            (that is, without correction to the loose negatives on Oct 24)
     Returns:
         perf_metric: the result of the performance evaluaiton
     """
@@ -424,9 +407,8 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     for batch in tqdm(data_loader):
         y_link_pred, y_amt_pred, _ = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, neg_sampler=neg_sampler, split_mode=split_mode,
-            num_firms=num_firms, num_products=num_products, use_prev_sampling=use_prev_sampling, 
+            num_firms=num_firms, num_products=num_products,
             include_inventory=include_inventory_penalties)
-#         print(y_link_pred.sum(axis=0))
         input_dict = {
             "y_pred_pos": y_link_pred[:, :1],
             "y_pred_neg": y_link_pred[:, 1:],
@@ -480,7 +462,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     # general parameters
     parser.add_argument('--model', type=str, help='Model name', default='tgnpl', choices=['tgnpl', 'graphmixer', 'inventory'])
-    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
+    parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph_tesla')
     parser.add_argument('--skip_amount', action="store_true", help='If true, skip amount prediction')
     parser.add_argument('--sweep', action='store_true', help='Launch hyperparameter sweep')
     parser.add_argument('--num_neighbors', type=int, help='Number of neighbors to store in NeighborLoader', default=10)
@@ -498,11 +480,11 @@ def parse_args():
     # GraphMixer model parameters
     parser.add_argument('--num_layers', type=int, default=2, help='number of model layers')
     parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
-    parser.add_argument('--time_gap', type=int, default=2000, help='time gap')
+    parser.add_argument('--time_gap', type=int, default=10, help='time gap')
     parser.add_argument('--token_dim_expansion_factor', type=float, default=0.5, help='token dimension expansion factor in MLPMixer')
     parser.add_argument('--channel_dim_expansion_factor', type=float, default=4.0, help='channel dimension expansion factor in MLPMixer')
     parser.add_argument('--node_features_dim', type=int, help='Node features dimension', default=10)
-    parser.add_argument('--num_channels', type=int, help='Node features dimension', default=100)
+    parser.add_argument('--num_channels', type=int, help='MLP projection dimension', defalt=10)
 
     # inventory module parameters
     parser.add_argument('--use_inventory', action='store_true', help='Whether to use inventory module')
@@ -525,12 +507,11 @@ def parse_args():
     parser.add_argument('--tolerance', type=float, help='Early stopper tolerance', default=1e-6)
     parser.add_argument('--patience', type=float, help='Early stopper patience', default=10)
     parser.add_argument('--ignore_patience_num_epoch', type=int, default=20, help='how many epochs we run before considering patience')
-    parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=1)
+    parser.add_argument('--num_run', type=int, help='Number of iteration runs', default=10)
     parser.add_argument('--num_train_days', type=int, help='How many days to use for training; used for debugging and faster training', default=-1)
     parser.add_argument('--train_on_val', action='store_true', help='Train on validation set with fixed negative sampled; used for debugging')
     parser.add_argument('--train_with_fixed_samples', action="store_true", help='Use fixed negative samples for training')
     parser.add_argument('--test_per_epoch', action="store_true", help='Evaluate MRR on test every epoch; used for debugging')
-    parser.add_argument('--use_prev_sampling', action='store_true', help = "Use previous negative sampling method")
     
     # system parameters
     parser.add_argument('--wandb', action='store_true', help='Wandb support')
@@ -551,7 +532,7 @@ def get_unique_id_for_experiment(args):
     """
     curr_time = f"{current_pst_time().strftime('%Y_%m_%d-%H_%M_%S')}"
     addl_id = f"{args.memory_name}_{args.emb_name}_{args.gpu}"
-    # include important parameters + time + additional identifier to prevent collision at large-scale launching
+    # include important parameters + time + additional identifier to reduce collision at large-scale launching
     exp_id = f'{args.model.upper()}_{args.dataset}_{args.use_inventory}_{curr_time}_{addl_id}'
     return exp_id
 
@@ -816,8 +797,7 @@ def run_experiment(args):
     num_nodes = len(metadata["id2entity"])  
     NUM_FIRMS = metadata["product_threshold"]
     NUM_PRODUCTS = num_nodes - NUM_FIRMS        
-    dataset = PyGLinkPropPredDatasetHyper(name=args.dataset, root="datasets", 
-                                          use_prev_sampling = args.use_prev_sampling)
+    dataset = PyGLinkPropPredDatasetHyper(name=args.dataset, root="datasets")
     print(f"There are {NUM_FIRMS} firms and {NUM_PRODUCTS} products")
     
     metric = dataset.eval_metric
@@ -895,7 +875,7 @@ def run_experiment(args):
                 # used for debugging: train on validation, with fixed negative samples
                 dataset.load_val_ns()  # load val negative samples
                 loss_dict = train(model, opt, neighbor_loader, data, val_loader, device, 
-                    neg_sampler=neg_sampler, split_mode="val", use_prev_sampling=args.use_prev_sampling,
+                    neg_sampler=neg_sampler, split_mode="val",
                     inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None),
                     include_inventory_penalties=include_inv_penalties)
                 # reset for beginning of val
@@ -908,7 +888,7 @@ def run_experiment(args):
                 # train on fixed negative samples instead of randomly drawn per epoch
                 dataset.load_train_ns()  # load train negative samples
                 loss_dict = train(model, opt, neighbor_loader, data, train_loader, device, 
-                    neg_sampler=neg_sampler, split_mode="train", use_prev_sampling=args.use_prev_sampling,
+                    neg_sampler=neg_sampler, split_mode="train", 
                     inv_loss_weight=args.inv_loss_weight, update_params=(opt is not None),
                     include_inventory_penalties=include_inv_penalties)
                 # Don't reset since val is a continuation of train
@@ -937,7 +917,7 @@ def run_experiment(args):
             start_val = timeit.default_timer()
             dataset.load_val_ns()  # load val negative samples
             val_dict = test(model, neighbor_loader, data, val_loader, neg_sampler, evaluator,
-                            device, split_mode="val", metric=metric, use_prev_sampling=args.use_prev_sampling,
+                            device, split_mode="val", metric=metric, 
                             include_inventory_penalties=include_inv_penalties)
             if 'inventory' in model:
                 model['inventory'].update_to_new_timestep()  # val ends at the end of t
@@ -963,7 +943,7 @@ def run_experiment(args):
                 start_test = timeit.default_timer()
                 dataset.load_test_ns()  # load test negative samples
                 test_dict = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
-                                 device, split_mode="test", metric=metric, use_prev_sampling=args.use_prev_sampling,
+                                 device, split_mode="test", metric=metric,
                                  include_inventory_penalties=include_inv_penalties)
                 time_test = timeit.default_timer() - start_test
                 print(f"\tTest {metric}: {test_dict['link_pred']:.4f}, RMSE: {test_dict['amount_pred']:.4f}")
@@ -1010,7 +990,6 @@ def run_experiment(args):
             start_test = timeit.default_timer()
             test_dict = test(model, neighbor_loader, data, test_loader, neg_sampler, evaluator,
                                     device, split_mode="test", metric=metric, 
-                                    use_prev_sampling=args.use_prev_sampling,
                                     include_inventory_penalties=include_inv_penalties)
             save_results({'model': MODEL_NAME,
                   'data': args.dataset,
@@ -1062,15 +1041,6 @@ if __name__ == "__main__":
     args, defaults, _ = parse_args()
     if args.sweep:
         hyps_list = []
-#         for num_neighbors in [5, 20, 50]:
-#             hyperparameters = {'num_neighbors': num_neighbors}
-#             hyps_list.append(hyperparameters)
-#         fixed_args = {'model': 'tgnpl', 
-#                       'dataset': 'tgbl-hypergraph_synthetic_std', 
-#                       'train_with_fixed_samples': None,
-#                       'mem_dim': 500,
-#                       'emb_dim': 500,
-#                       'bs': 30}
         for num_neighbors in [5, 20, 50]:
             hyperparameters = {'num_neighbors': num_neighbors, 'time_gap': num_neighbors}
             hyps_list.append(hyperparameters)
@@ -1082,7 +1052,7 @@ if __name__ == "__main__":
                       'time_gap': 10,
                       'bs': 30}
         do_hyperparameter_sweep(hyps_list, fixed_args, gpus=[5, 6, 7])
-#     labeling_args = compare_args(args, defaults)
     else:
         torch.autograd.set_detect_anomaly(True)
         run_experiment(args)
+

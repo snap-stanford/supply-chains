@@ -16,7 +16,7 @@ from tgb.utils.pre_process import (
     csv_to_pd_data_sc,
     csv_to_pd_data_rc,
     load_edgelist_wiki,
-    csv_to_pd_data_hitachi,
+    csv_to_pd_data_supplychains,
     convert_hypergraph
 )
 from tgb.utils.utils import save_pkl, load_pkl
@@ -28,8 +28,7 @@ class LinkPropPredDataset(object):
         name: str,
         root: Optional[str] = "datasets",
         meta_dict: Optional[dict] = None,
-        preprocess: Optional[bool] = True,
-        use_prev_sampling = False,
+        preprocess: Optional[bool] = True
     ):
         r"""Dataset class for link prediction dataset. Stores meta information about each dataset such as evaluation metrics etc.
         also automatically pre-processes the dataset.
@@ -47,7 +46,6 @@ class LinkPropPredDataset(object):
             self.url = None
             print(f"Dataset {self.name} url not found, download not supported yet.")
 
-        
         # check if the evaluatioin metric are specified
         if self.name in DATA_EVAL_METRIC_DICT:
             self.metric = DATA_EVAL_METRIC_DICT[self.name]
@@ -58,7 +56,6 @@ class LinkPropPredDataset(object):
             print(
                 f"Dataset {self.name} default evaluation metric not found, it is not supported yet."
             )
-
 
         root = PROJ_DIR + root
 
@@ -73,7 +70,6 @@ class LinkPropPredDataset(object):
             self.meta_dict["fname"] = self.root + "/" + self.name + "_edgelist.csv"
             self.meta_dict["nodefile"] = None
 
-        # TODO update the logic here to load the filenames from info.py
         if name == "tgbl-flight":
             self.meta_dict["nodefile"] = self.root + "/" + "airport_node_feat.csv"
 
@@ -88,25 +84,17 @@ class LinkPropPredDataset(object):
         if ("tgbl-supplychains" not in self.name or "tgbl-hypergraph" not in self.name or "tgbl-sync" not in self.name):
             self.download()
         
-        # check if the root directory exists, if not create it
+        # check if the root directory exists, if not raise error
         if osp.isdir(self.root):
             print("Dataset directory is ", self.root)
         else:
-            # os.makedirs(self.root)
             raise FileNotFoundError(f"Directory not found at {self.root}")
 
         if preprocess:
             isHyperGraphBool = ("tgbl-hypergraph" in self.name or "tgbl-sync" in self.name)
             self.pre_process(isHyperGraph = isHyperGraphBool)
-            #self.pre_process(isHyperGraph = self.name in ['tgbl-hypergraph','tgbl-sync'])
 
-        #TODO: adjust the Negative Edge Sampler to work with the hypergraph data
-        if ("tgbl-hypergraph" in self.name and use_prev_sampling == True):
-            #backward compatibility with the original method for negative hyper-edge sampling
-            self.ns_sampler = NegativeHyperEdgeSampler(
-                dataset_name=self.name, strategy="hist_rnd"
-            )
-        elif ("tgbl-hypergraph" in self.name or "tgbl-sync" in self.name):
+        if ("tgbl-hypergraph" in self.name or "tgbl-sync" in self.name):
             self.ns_sampler = NegativeHyperEdgeSampler_V2(
                 dataset_name=self.name, strategy="hist_rnd"
             )
@@ -204,9 +192,8 @@ class LinkPropPredDataset(object):
             elif self.name == "tgbl-wiki":
                 df, edge_feat, node_ids = load_edgelist_wiki(self.meta_dict["fname"])
             elif "tgbl-supplychains" in self.name:
-                #TODO: change this 
                 print(self.meta_dict["fname"])
-                df, edge_feat, node_ids = csv_to_pd_data_hitachi(self.meta_dict["fname"])
+                df, edge_feat, node_ids = csv_to_pd_data_supplychains(self.meta_dict["fname"])
             elif "tgbl-hypergraph" in self.name:
                 df, edge_feat, node_ids = convert_hypergraph(self.meta_dict["fname"])
             elif "tgbl-sync" in self.name:
@@ -225,8 +212,6 @@ class LinkPropPredDataset(object):
         Pre-process the dataset and generates the splits, must be run before dataset properties can be accessed
         generates the edge data and different train, val, test splits
         """
-        # TODO for link prediction, y =1 because these are all true edges, edge feat = weight + edge feat
-
         # check if path to file is valid
         df, edge_feat, node_feat = self.generate_processed_files()
         sources = np.array(df["u"])
@@ -238,9 +223,6 @@ class LinkPropPredDataset(object):
         weights = np.array(df["w"])
 
         edge_label = np.ones(len(df))  # should be 1 for all pos edges
-        # self._edge_feat = edge_feat + weights.reshape(
-        #     -1, 1
-        # )  # reshape weights as feature if available #! to remove
         self._edge_feat = edge_feat
         self._node_feat = node_feat
 

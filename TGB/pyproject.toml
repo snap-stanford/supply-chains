@@ -1,9 +1,8 @@
 [tool.poetry]
 name = "py-tgb"
 version = "0.6.1"
-description = "Temporal Graph Benchmark project repo"
-authors = ["shenyang Huang <shenyang.huang@mail.mcgill.ca>", "Farimah Poursafaei", "Emanuele Rossi <emanuele.rossi1909@gmail.com>", "Jacob Danovitch <jacob.danovitch@mila.quebec>"]
-readme = "README.md"
+description = "Temporal Production Learning project repo"
+authors = ["anonymous"]
 packages = [{include = "tgb"}]
 
 [tool.poetry.dependencies]

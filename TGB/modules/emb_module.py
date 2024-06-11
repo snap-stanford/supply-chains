@@ -4,6 +4,8 @@ See TGN for options: https://arxiv.org/pdf/2006.10637.pdf
 - Identity
 - Temporal Graph Attention
 - Temporal Graph Sum
+
+MLP-based GRAPHMIXER time embedding
 """
 
 import math

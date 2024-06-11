@@ -60,9 +60,3 @@ for subdir in os.listdir(DATA_DIR):
     if osp.isdir(osp.join(DATA_DIR, subdir)) and subdir.startswith('tgbl_hypergraph'):
         dataset_name = 'tgbl-hypergraph_' + '_'.join(subdir.split('_')[2:])
         DATA_EVAL_METRIC_DICT[dataset_name] = 'mrr'
-
-DATA_NUM_CLASSES = {
-    "tgbn-trade": 255,
-    "tgbn-genre": 513,
-    "tgbn-reddit": 698,
-}

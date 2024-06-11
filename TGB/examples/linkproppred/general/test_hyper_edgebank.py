@@ -26,8 +26,7 @@ from modules.hyper_edgebank import HyperEdgeBankPredictor
 TGB_DIRECTORY = "/".join(str(__file__).split("/")[:-4])
 PATH_TO_DATASETS = os.path.join(TGB_DIRECTORY, "tgb/datasets/")
 
-def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, use_counts=True, use_median=True,
-                  use_prev_sampling=False, ns_samples=6):
+def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, use_counts=True, use_median=True, ns_samples=6):
     """
     Evaluated the dynamic link prediction
     Evaluation happens as 'one vs. many', meaning that each positive edge is evaluated against many negative edges
@@ -56,35 +55,17 @@ def test_edgebank(loader, neg_sampler, split_mode, evaluator, metric, edgebank, 
         )
         bs = len(pos_src)
         
-        if use_prev_sampling == True:
-            #using the negative sampling procedure prior to Oct 24 (no loose negatives)
-            neg_batch_list = neg_sampler.query_batch(pos_src, pos_prod, pos_dst, pos_t, split_mode=split_mode)
-            assert len(neg_batch_list) == bs
-            neg_batch_list = torch.Tensor(neg_batch_list)
-            ns_samples = neg_batch_list.size(1) // 3  # num negative samples per src/prod/dst
-            neg_src = neg_batch_list[:, :ns_samples]   # we assume neg batch is ordered by neg_src, neg_prod, neg_dst
-            neg_prod = neg_batch_list[:, ns_samples:(2*ns_samples)]  
-            neg_dst = neg_batch_list[:, (2*ns_samples):] 
-            
-            num_samples = (3*ns_samples)+1  # total num samples per data point
-            batch_src = pos_src.reshape(bs, 1).repeat(1, num_samples)  # [[src1, src1, ...], [src2, src2, ...]]
-            batch_src[:, 1:ns_samples+1] = neg_src  # replace pos_src with negatives
-            batch_prod = pos_prod.reshape(bs, 1).repeat(1, num_samples)
-            batch_prod[:, ns_samples+1:(2*ns_samples)+1] = neg_prod  # replace pos_prod with negatives
-            batch_dst = pos_dst.reshape(bs, 1).repeat(1, num_samples)
-            batch_dst[:, (2*ns_samples)+1:] = neg_dst  # replace pos_dst with negatives
-        else:
-            #using the current negative sampling for hypergraph
-            neg_batch_list = neg_sampler.query_batch(pos_src, pos_dst, pos_prod, pos_t, split_mode=split_mode)
-            assert len(neg_batch_list) == bs
-            neg_batch_list = torch.Tensor(np.array(neg_batch_list)).int()
-            num_samples = neg_batch_list.size(1) + 1
-            neg_src = neg_batch_list[:,:,0]
-            neg_dst = neg_batch_list[:,:,1]
-            neg_prod = neg_batch_list[:,:,2]
-            batch_src = torch.cat((torch.unsqueeze(pos_src,-1), neg_src), dim = -1)
-            batch_dst = torch.cat((torch.unsqueeze(pos_dst,-1), neg_dst), dim = -1)
-            batch_prod = torch.cat((torch.unsqueeze(pos_prod,-1), neg_prod), dim = -1)
+        #using the current negative sampling for hypergraph
+        neg_batch_list = neg_sampler.query_batch(pos_src, pos_dst, pos_prod, pos_t, split_mode=split_mode)
+        assert len(neg_batch_list) == bs
+        neg_batch_list = torch.Tensor(np.array(neg_batch_list)).int()
+        num_samples = neg_batch_list.size(1) + 1
+        neg_src = neg_batch_list[:,:,0]
+        neg_dst = neg_batch_list[:,:,1]
+        neg_prod = neg_batch_list[:,:,2]
+        batch_src = torch.cat((torch.unsqueeze(pos_src,-1), neg_src), dim = -1)
+        batch_dst = torch.cat((torch.unsqueeze(pos_dst,-1), neg_dst), dim = -1)
+        batch_prod = torch.cat((torch.unsqueeze(pos_prod,-1), neg_prod), dim = -1)
         
         # link prediction performance
         y_pred, _ = edgebank.predict(batch_src.flatten(), batch_dst.flatten(), batch_prod.flatten(),
@@ -134,7 +115,6 @@ def test_edgebank_on_dataset(args):
     # apply log scaling and standard scaling to edge features    
     for d in range(data.msg.shape[1]):
         vals = data.msg[:, d]
-        print(vals)
         assert (vals >= 0).all()  # if we are logging, all values need to be positive
         min_val = torch.min(vals[vals > 0])  # minimum value greater than 0
         vals = torch.clip(vals, min_val, None)  # clip so we don't take log of 0
@@ -162,18 +142,14 @@ def test_edgebank_on_dataset(args):
     edgebank.fit(train_data.src, train_data.dst, train_data.prod, train_data.msg)
     
     dataset.load_val_ns()  # load validation negative samples
-    val_bin, val_rmse_mean = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=False, use_median=False,
-                            use_prev_sampling=args.use_prev_sampling)  # binary on validation set
-    val_cnt, val_rmse_median = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=True, use_median=True,
-                            use_prev_sampling=args.use_prev_sampling)  # count on validation set
+    val_bin, val_rmse_mean = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=False, use_median=False)  # binary on validation set
+    val_cnt, val_rmse_median = test_edgebank(val_loader, neg_sampler, "val", evaluator, metric, edgebank, use_counts=True, use_median=True)  # count on validation set
     print(f'Validation set MRRs: binary = {val_bin:0.4f}, count = {val_cnt:0.4f}; Val set RMSE: {val_rmse_mean: 0.4f}')
     print(f'Validation set RMSE: mean = {val_rmse_mean: 0.4f}, median = {val_rmse_median: 0.4f}')  
 
     dataset.load_test_ns()  # load test negative samples
-    test_bin, test_rmse_mean = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=False, use_median=False,
-                             use_prev_sampling=args.use_prev_sampling)  # binary on test set
-    test_cnt, test_rmse_median = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=True, use_median=True,
-                             use_prev_sampling=args.use_prev_sampling)  # binary on test set
+    test_bin, test_rmse_mean = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=False, use_median=False)  # binary on test set
+    test_cnt, test_rmse_median = test_edgebank(test_loader, neg_sampler, "test", evaluator, metric, edgebank, use_counts=True, use_median=True)  # binary on test set
     print(f'Test set MRRs: binary = {test_bin:0.4f}, count = {test_cnt:0.4f}')
     print(f'Test set RMSE: mean = {test_rmse_mean: 0.4f}, median = {test_rmse_median: 0.4f}')  
     return val_bin, val_cnt, val_rmse_mean, val_rmse_median, test_bin, test_cnt, test_rmse_mean, test_rmse_median
@@ -182,7 +158,7 @@ def test_edgebank_on_dataset(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, help='Dataset name', default='tgbl-hypergraph')
-    parser.add_argument('--use_prev_sampling', action='store_true')
     args = parser.parse_args()
     
     test_edgebank_on_dataset(args)
+

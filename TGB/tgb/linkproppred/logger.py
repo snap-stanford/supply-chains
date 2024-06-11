@@ -31,7 +31,7 @@ class TensorboardLogger(LoggerMixin):
         
 
 class WandbLogger(LoggerMixin):
-    def __init__(self, num_neighbors=10, model_name='tgnpl', wandb_project="model-experiments", wandb_team="snap", *args):
+    def __init__(self, num_neighbors=10, model_name='tgnpl', wandb_project="model-experiments", wandb_team="supply-chains", *args):
         super().__init__()
         wandb.init(
             # set the wandb project where this run will be logged
@@ -49,5 +49,4 @@ class WandbLogger(LoggerMixin):
         wandb.log({f"{mode}_{metric}": kwargs[metric] for metric in self.logged_metrics})
 
     def __del__(self):
-        # pass
         wandb.finish()

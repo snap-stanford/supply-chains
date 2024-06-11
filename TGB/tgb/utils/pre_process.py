@@ -504,7 +504,7 @@ def csv_to_pd_data_sc(
         node_ids,
     )
 
-def csv_to_pd_data_hitachi(
+def csv_to_pd_data_supplychains(
     fname: str,
 ) -> pd.DataFrame:
     r"""
