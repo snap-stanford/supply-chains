@@ -164,7 +164,7 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
     best_weights = None
     for ep in range(num_epochs):
         start_time = time.time()
-        loss, debt_loss, consump_rwd = 0, 0, 0
+        total_loss, total_debt_loss, total_consump_rwd = 0, 0, 0
         for t in timesteps:
             to_keep = transactions.ts.values == t
             src = torch.Tensor(transactions['source'].values[to_keep]).long().to(device)
@@ -178,11 +178,11 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
             loss.backward(retain_graph=False)
             opt.step()
             module.detach()
-            loss += float(loss)
-            debt_loss += float(debt_loss)
-            consump_rwd += float(consump_rwd)
+            total_loss += float(loss)
+            total_debt_loss += float(debt_loss)
+            total_consump_rwd += float(consump_rwd)
         module.reset()  # reset inventory
-        losses.append(float(loss))
+        losses.append(total_loss)
             
         weights = module._get_prod_attention(prod_emb=prod_emb).cpu().detach().numpy()
         if show_weights and (ep % 5) == 0:
@@ -193,7 +193,7 @@ def predict_product_relations_with_inventory_module(transactions, firms, product
             
         prod_map = mean_average_precision(prod_graph, prod2idx, weights, products_to_test=products_to_test)
         duration = time.time()-start_time
-        print(f'Ep {ep}: MAP={prod_map:0.4f}, loss={loss:0.4f}, debt_loss={debt_loss:0.4f}, consump_rwd={consump_rwd:0.4f} [time={duration:0.2f}s]')
+        print(f'Ep {ep}: MAP={prod_map:0.4f}, loss={total_loss:0.4f}, debt_loss={total_debt_loss:0.4f}, consump_rwd={total_consump_rwd:0.4f} [time={duration:0.2f}s]')
         if len(maps) == 0 or prod_map > np.max(maps):
             no_improvement = 0
             best_weights = weights.copy()
@@ -441,7 +441,65 @@ def compare_methods_on_data(dataset, methods, synthetic_type=None, num_seeds=1, 
         if save_results:
             with open(f'inventory-tgnpl_{postfix}.pkl', 'wb') as f:
                 pickle.dump(mats[np.argmax(maps)], f)
+                
+def get_tesla_weights(num_epochs=50):
+    """
+    Get Tesla weights.
+    """
+    path_to_dataset = '/lfs/local/0/serinac/supply-chains/TGB/tgb/datasets/tgbl_hypergraph_tesla'
+    dataname = 'tgbl-hypergraph_tesla'
+    meta_fn = os.path.join(path_to_dataset, f'{dataname}_meta.json')
+    with open(meta_fn, 'r') as f:
+        metadata = json.load(f)
+    # set global data variables
+    num_nodes = len(metadata["id2entity"])  
+    num_firms = metadata["product_threshold"]
+    num_products = num_nodes - num_firms  
+    print(f'Found {num_firms} firms and {num_products} products')
+    
+    transactions_fn = os.path.join(path_to_dataset, f'{dataname}_edgelist.csv')
+    transactions = pd.read_csv(transactions_fn)
+    train_max_ts = transactions.ts.quantile(0.7).astype(int)
+    print('Train max ts:', train_max_ts)
+    transactions = transactions[transactions.ts <= train_max_ts]
+    print(f'Num train transactions: {len(transactions)}')  # should match link pred experiments
         
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    module = TGNPLInventory(num_firms, num_products, learn_att_direct=True, device=device)                
+    opt = torch.optim.Adam(module.parameters())
+
+    # train inventory module
+    timesteps = transactions.ts.unique()
+    losses = []
+    no_improvement = 0
+    best_weights = None
+    for ep in range(num_epochs):
+        start_time = time.time()
+        total_loss, total_debt_loss, total_consump_rwd = 0, 0, 0
+        for t in timesteps:
+            to_keep = transactions.ts.values == t
+            src = torch.Tensor(transactions['source'].values[to_keep]).long().to(device)
+            dst = torch.Tensor(transactions['target'].values[to_keep]).long().to(device)
+            prod = torch.Tensor(transactions['product'].values[to_keep]).long().to(device)
+            ts = torch.Tensor(transactions['ts'].values[to_keep]).long().to(device)
+            msg = torch.Tensor(transactions['weight'].values[to_keep].reshape(-1, 1)).to(device)
+
+            opt.zero_grad()
+            loss, debt_loss, consump_rwd = module(src, dst, prod, ts, msg)
+            loss.backward(retain_graph=False)
+            opt.step()
+            module.detach()
+            total_loss += float(loss)
+            total_debt_loss += float(debt_loss)
+            total_consump_rwd += float(consump_rwd)
+        module.reset()  # reset inventory
+        losses.append(total_loss)
+        print(ep, total_loss)
+    
+    weights = module._get_prod_attention().cpu().detach().numpy()
+    with open('inventory_tesla.pkl', 'wb') as f:
+        pickle.dump(weights, f)
+
         
 if __name__ == "__main__":        
     # gridsearch_on_hyperparameters()
@@ -449,5 +507,6 @@ if __name__ == "__main__":
 #     train_node2vec_on_firm_product_graph(transactions, firms, products, 'node2vec_embs_sem.pkl')
     # compare_methods_on_data('synthetic', ALL_METHODS, synthetic_type='missing', num_seeds=10, gpu=1)
     # compare_methods_on_data('sem', ALL_METHODS, num_seeds=10, gpu=1)
-#     compare_methods_on_data('synthetic', ['inventory-node2vec'], synthetic_type='std', num_seeds=10, gpu=4, save_results=True)
-    compare_methods_on_data('sem', ['inventory-emb'], num_seeds=10, gpu=3, save_results=True)
+    # compare_methods_on_data('synthetic', ['inventory-node2vec'], synthetic_type='missing', num_seeds=10, gpu=5, save_results=True)
+#     compare_methods_on_data('sem', ['inventory-emb'], num_seeds=10, gpu=3, save_results=True)
+    get_tesla_weights(num_epochs=50)
