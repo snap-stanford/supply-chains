@@ -61,11 +61,11 @@ To run SC-TGN, use the following command:
 ```
 python model_experiments.py --train_with_fixed_samples --model tgnpl --memory_name tgnpl --emb_name attn --ARGS
 ``` 
-Other variations of above including static, graph transformer, SC-TGN (id) replace `--memory_name` and `--emb_name` arguments with `static` and `id`, `static` and `attn`, and `tgnpl` and `id`, respectively. The model is comparable with the original TGN (Huang et al., 2023), if one appends two additional arguments `--init_memory_not_learnable` and `--update_penalty 0` to the above command (see more justification of SC-TGN vs TGN in Appendix A.2).
+Other variations of above including static, graph transformer, SC-TGN (id) replace `--memory_name` and `--emb_name` arguments with `static` and `id`, `static` and `attn`, and `tgnpl` and `id`, respectively. The model is comparable with the original TGN (Huang et al., 2023), if one removes `--train_with_fixed_samples` and adds the arguments `--init_memory_not_learnable`,  `--update_penalty 0`, and `--skip_amount` to the above command (see comparison of SC-TGN vs TGN in Appendix A.2).
 
 To run SC-GraphMixer, use the following command:
 ```
 python model_experiments.py --train_with_fixed_samples --model graphmixer --ARGS
 ```
 
-To include the inventory module, simply add the flag `--use_inventory`. There are also a number of other optional parameters related to the inventory module. For example, we find that providing initial attention weights via `--att_weights` helps with model training. Optionally, one can skip amount prediction by using `--skip_amount`. When the ground-truth production functions are known, they can also be provided via `--prod_graph {PROD_GRAPH_FILE}.pkl`.
+To include the inventory module, simply add the flag `--use_inventory`. There are also a number of other optional parameters related to the inventory module. For example, we find that providing initial attention weights via `--att_weights` helps with model training. To run an experiment where the inventory module's attention weights are set to the ground-truth production functions, the functions should be provided via `--prod_graph {PROD_GRAPH_FILE}.pkl`, and use `--fix_inventory` so that the attention weights are not updated during training (see Appendix C.2 and Table 6).
