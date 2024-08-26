@@ -1,5 +1,5 @@
-# Learning production functions from temporal graphs
-This repo contains code for the paper "Learning production functions from temporal graphs" (under review). Our code extends code from the [TGB](https://github.com/shenyangHuang/TGB) and [TGB_Baselines](https://github.com/fpour/TGB_Baselines) repositories. 
+# Learning production functions from supply chain networks
+This repo contains code for our paper on learning production functions from supply chain networks (under review). Our code extends code from the [TGB](https://github.com/shenyangHuang/TGB) and [TGB_Baselines](https://github.com/fpour/TGB_Baselines) repositories. 
 
 ## Installation
 ```
