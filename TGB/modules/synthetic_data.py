@@ -203,16 +203,22 @@ def generate_demand_schedule(num_timesteps, prod_graph, prod2firms, seed=0, min_
 
 def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, seed=0, 
                                        default_supply=1e6, shock_supply=1000, shock_prob=0.001, 
-                                       shock_probs=None, recovery_rate=1.25):
+                                       shock_probs_per_time=None, shock_probs_per_prod=None,
+                                       recovery_rate=1.25):
     """
     Generate schedule of supply for exogenous products with possible shocks to supply.
     """
     np.random.seed(seed)
     exog_prods = sorted(set(prod_graph.source.values) - set(prod_graph.dest.values))  # exog products, only used as input
-    if shock_probs is None:
-        expected_num_shocks = len(exog_prods) * num_timesteps * shock_prob
+    if shock_probs_per_time is not None and shock_probs_per_prod is not None:
+        raise Exception("Generate exogenous schedule: can't accomodate time-based and prod-based scheduling at the same time")
+    if shock_probs_per_time:
+        expected_num_shocks = np.sum(len(exog_prods) * shock_probs_per_time)
+    elif shock_probs_per_prod:
+        assert(len(shock_probs_per_prod)==len(exog_prods)) # shocks can only happen to exogeneous products
+        expected_num_shocks = np.sum(num_timesteps * shock_probs_per_prod)
     else:
-        expected_num_shocks = np.sum(len(exog_prods) * shock_probs)
+        expected_num_shocks = len(exog_prods) * num_timesteps * shock_prob
     print(f'Found {len(exog_prods)} exogenous products -> expected num shocks = {expected_num_shocks:0.3f}')
     # default_supply = shock_supply * recovery_rate^k 
     # log default_supply = log shock_supply + k log recovery_rate
@@ -224,9 +230,14 @@ def generate_exog_schedule_with_shocks(num_timesteps, prod_graph, prod2firms, se
     exog_schedule = {}  # t -> (firm, product) -> supply
     for t in range(num_timesteps):
         exog_supp_t = {}
-        for p in exog_prods:
+        for pi, p in enumerate(exog_prods):
             prev_supp = prod2supply[p]
-            prob = shock_prob if shock_probs is None else shock_probs[t]
+            if shock_probs_per_time:
+                prob = shock_probs_per_time[t]
+            elif shock_probs_per_prod:
+                prob = shock_probs_per_prod[pi]
+            else:
+                prob = shock_prob            
             if np.random.rand() < prob:   # shock occurred
                 print(f'Shock to {p} at time {t}')
                 curr_supp = shock_supply
