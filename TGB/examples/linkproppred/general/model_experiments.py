@@ -41,7 +41,7 @@ from tgb.linkproppred.dataset_pyg import PyGLinkPropPredDatasetHyper, TimeSpecif
 # ===========================================
 def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                          ns_samples=6, neg_sampler=None, split_mode="val",
-                         num_firms=None, num_products=None,
+                         num_firms=None, num_products=None, amt_mean=None, amt_std=None,
                          include_inventory=True):
     """
     Get model scores for a batch's positive edges and its corresponding negative samples.
@@ -69,6 +69,10 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         num_firms = NUM_FIRMS
     if num_products is None:
         num_products = NUM_PRODUCTS
+    if amt_mean is None:
+        amt_mean = AMT_MEAN
+    if amt_std is None:
+        amt_std = AMT_STD
     num_nodes = num_firms + num_products
     # Helper vector to map global node indices to local ones
     assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
@@ -193,7 +197,7 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
         no_parts = torch.isclose(caps, neg_ones)  
         assert (caps[~no_parts] >= 0).all()
         skip_amt = to_skip | no_parts | torch.isclose(caps, torch.zeros_like(caps))  # zero suggests incorrect prediction
-        caps[~skip_amt] = (torch.log(caps[~skip_amt])-AMT_MEAN)/AMT_STD  # apply log and standard scaling
+        caps[~skip_amt] = (torch.log(caps[~skip_amt])-amt_mean)/amt_std  # apply log and standard scaling
         caps = caps.reshape(-1, 1)
         
         if MODEL_NAME == 'INVENTORY':
@@ -209,15 +213,118 @@ def get_y_pred_for_batch(batch, model, neighbor_loader, data, device,
                 y_amt_pred = None
         
     return y_link_pred, y_amt_pred, update_loss
+
+
+def generate_next_timestep(src, dst, prod, next_t, model, neighbor_loader, data, device,
+                           num_firms=None, num_products=None, amt_mean=None, amt_std=None,
+                           include_inventory=True, threshold=0):
+    """
+    Generate transactions for next timestep, out of possible transactions src, dst, prod.
+    Logic is very similar to get_y_pred_for_batch.
+    """
+    assert len(src) == len(dst)
+    assert len(src) == len(prod)
+    assert MODEL_NAME in {'TGNPL', 'GRAPHMIXER'}
+    # use global variables when arguments are not specified
+    if num_firms is None:
+        num_firms = NUM_FIRMS
+    if num_products is None:
+        num_products = NUM_PRODUCTS
+    num_nodes = num_firms + num_products
+    if amt_mean is None:
+        amt_mean = AMT_MEAN
+    if amt_std is None:
+        amt_std = AMT_STD
+    # Helper vector to map global node indices to local ones
+    assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
+    
+    # 1. get predictions for link *existence* from TGNPL or GraphMixer
+    if MODEL_NAME == 'TGNPL':
+        # Get updated memory of all nodes involved in the computation.
+        f_id = torch.cat([src, dst]).unique()
+        p_id = torch.cat([prod]).unique()
+        n_id, edge_index, e_id = neighbor_loader(f_id, p_id)
+        assoc[n_id] = torch.arange(n_id.size(0), device=device)
+
+        memory, last_update, _ = model['memory'](n_id)
+        z = model['gnn'](
+            memory,
+            last_update,
+            edge_index,
+            repeat_tensor(data.t, 2)[e_id].to(device),
+            repeat_tensor(data.msg, 2)[e_id].to(device),
+        )
+        y_link_pred = model['link_pred'](z[assoc[src]], z[assoc[dst]], z[assoc[prod]])
+    else:
+        batch_src_node_embeddings, batch_dst_node_embeddings, batch_prod_node_embeddings = \
+            model['graphmixer'].compute_src_dst_prod_node_temporal_embeddings(src_node_ids=src,
+                                                                              dst_node_ids=dst,
+                                                                              prod_node_ids=prod,
+                                                                              node_interact_times=t,
+                                                                              neighbor_loader=neighbor_loader)
+        y_link_pred = model['link_pred'](batch_src_node_embeddings,
+                                         batch_dst_node_embeddings,
+                                         batch_prod_node_embeddings).squeeze(dim=-1)
+    # add inventory penalties if we're using them
+    if 'inventory' in model and include_inventory:
+        assert next_t == model['inventory'].curr_t
+        if model['inventory'].learn_att_direct:
+            penalties = model['inventory'].link_pred_penalties(src, prod)
+        else:
+            prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
+            penalties = model['inventory'].link_pred_penalties(src, prod, prod_emb=prod_embs)
+        print('num nonzero penalties:', (penalties > 0).sum())
+        # use inventory module to penalize "impossible" transactions
+        assert (penalties >= 0).all()
+        y_link_pred -= penalties.reshape(y_link_pred.shape)
+    pos = (y_link_pred >= threshold).reshape(-1)  # links that are kept
+    print(f'Timestep {next_t}: keeping {pos.sum().int()} out of {len(src)} transactions with score >= {threshold}')    
+    
+    # 2. get amount prediction for predicted links
+    assert 'amount_pred' in model
+    if MODEL_NAME == 'TGNPL':
+        y_amt_pred = model['amount_pred'](z[assoc[src[pos]]], z[assoc[dst[pos]]], z[assoc[prod[pos]]])
+    elif MODEL_NAME == 'GRAPHMIXER':
+        y_amt_pred = model['amount_pred'](batch_src_node_embeddings[pos], 
+                                          batch_dst_node_embeddings[pos],
+                                          batch_prod_node_embeddings[pos])
+    assert y_amt_pred.shape == (pos.sum(), 1)
+    # add inventory caps if we're using them
+    if 'inventory' in model and include_inventory:
+        if model['inventory'].learn_att_direct:
+            caps = model['inventory'].amount_caps(src[pos], prod[pos])
+        else:  # need product embeddings
+            prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
+            caps = model['inventory'].amount_caps(src[pos], prod[pos], prod_emb=prod_embs)
+        # use inventory module to cap maximum amount possible
+        # we use -1 to indicate products without parts; can't compute cap
+        neg_ones = torch.full(caps.shape, -1, dtype=caps.dtype).to(device)
+        no_parts = torch.isclose(caps, neg_ones)  
+        assert (caps[~no_parts] >= 0).all()
+        skip_amt = no_parts | torch.isclose(caps, torch.zeros_like(caps))  # zero suggests incorrect prediction
+        caps[~skip_amt] = (torch.log(caps[~skip_amt])-amt_mean)/amt_std  # apply log and standard scaling
+        caps = caps.reshape(-1, 1)
+        caps[skip_amt] = y_amt_pred[skip_amt]  # replace with original prediction
+        print(f"Capping {(caps < y_amt_pred).sum().int()}")
+        y_amt_pred = torch.minimum(y_amt_pred, caps)  # can't predict more than inventory caps    
+        
+    return y_link_pred, pos, y_amt_pred
     
     
 def update_inventory_and_compute_loss(batch, model, neighbor_loader, data, device,
-                                      num_firms=None, num_products=None):
+                                      num_firms=None, num_products=None, transactions=None):
     """
     Update inventory per firm based on latest batch and compute losses.
     """
+    if transactions is None:
+        assert batch is not None
+        src, dst, prod, t, amt = batch.src, batch.dst, batch.prod, batch.t, batch.amt
+    else:
+        n = len(transactions[0])
+        assert all([len(v) == n for v in transactions])
+        src, dst, prod, t, amt = transactions
     if model['inventory'].learn_att_direct:
-        inv_loss, debt_loss, consump_rwd = model['inventory'](batch.src, batch.dst, batch.prod, batch.t, batch.amt)
+        inv_loss, debt_loss, consump_rwd = model['inventory'](src, dst, prod, t, amt)
     else:
         # get product embeddings
         if num_firms is None:
@@ -226,8 +333,7 @@ def update_inventory_and_compute_loss(batch, model, neighbor_loader, data, devic
             num_products = NUM_PRODUCTS
         num_nodes = num_firms + num_products
         prod_embs = get_product_embeddings(model, neighbor_loader, num_firms, num_products, data, device)
-        inv_loss, debt_loss, consump_rwd = model['inventory'](batch.src, batch.dst, batch.prod, batch.t, 
-                                                              batch.amt, prod_emb=prod_embs)
+        inv_loss, debt_loss, consump_rwd = model['inventory'](src, dst, prod, t, amt, prod_emb=prod_embs)
     return inv_loss, debt_loss, consump_rwd
 
 
@@ -268,7 +374,7 @@ def get_product_embeddings(model, neighbor_loader, num_firms, num_products, data
 def train(model, optimizer, neighbor_loader, data, data_loader, device, 
           loss_name='ce-softmax', amt_loss_weight=1, inv_loss_weight=1, 
           update_params=True, ns_samples=6, neg_sampler=None, split_mode="val",
-          num_firms=None, num_products=None,
+          num_firms=None, num_products=None, amt_mean=None, amt_std=None,
           include_inventory_penalties=True):
     """
     Training procedure.
@@ -313,7 +419,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
             
         y_link_pred, y_amt_pred, update_loss = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, ns_samples=ns_samples, neg_sampler=neg_sampler, 
-            split_mode=split_mode, num_firms=num_firms, num_products=num_products,
+            split_mode=split_mode, num_firms=num_firms, num_products=num_products, amt_mean=amt_mean, amt_std=amt_std,
             include_inventory=include_inventory_penalties)
         assert y_link_pred.size(1) == (3*ns_samples)+1
 
@@ -376,7 +482,7 @@ def train(model, optimizer, neighbor_loader, data, data_loader, device,
 
 @torch.no_grad()
 def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, device,
-         split_mode="val", metric="mrr", num_firms=None, num_products=None, 
+         split_mode="val", metric="mrr", num_firms=None, num_products=None, amt_mean=None, amt_std=None,
          include_inventory_penalties=True):
     """
     Evaluation procedure for TGN-PL model.
@@ -407,7 +513,7 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
     for batch in tqdm(data_loader):
         y_link_pred, y_amt_pred, _ = get_y_pred_for_batch(
             batch, model, neighbor_loader, data, device, neg_sampler=neg_sampler, split_mode=split_mode,
-            num_firms=num_firms, num_products=num_products,
+            num_firms=num_firms, num_products=num_products, amt_mean=amt_mean, amt_std=amt_std,
             include_inventory=include_inventory_penalties)
         input_dict = {
             "y_pred_pos": y_link_pred[:, :1],
@@ -425,7 +531,6 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         total_num_events += batch.num_events
         
         # Update time-varying states with ground-truth transactions
-        
         if MODEL_NAME == 'TGNPL':
             neighbor_loader.insert(batch.src, batch.dst, batch.prod)
             model['memory'].update_state(batch.src, batch.dst, batch.prod, batch.t, batch.msg)
@@ -439,6 +544,42 @@ def test(model, neighbor_loader, data, data_loader, neg_sampler, evaluator, devi
         total_perf_dict[p] = total / total_num_events
     return total_perf_dict
 
+@torch.no_grad()
+def forecast(model, neighbor_loader, src, dst, prod, start_t, num_t, data, device, 
+             num_firms=None, num_products=None, amt_mean=None, amt_std=None,
+             include_inventory_penalties=True, threshold=0):
+    """
+    Forecast (i.e., generate) future transactions for num_t timesteps, starting from start_t.
+    Only consider transactions between src, dst, and prod (eg, this could be all possible triplets,
+    or all seen triplets over some past time range).
+    """
+    for module in model.values():
+        module.eval()
+    
+    predicted_txns = {}
+    for t in range(start_t, start_t+num_t):
+        y_link_pred, pos, y_amt_pred = generate_next_timestep(
+                src, dst, prod, t, model, neighbor_loader, data, device,
+                num_firms=num_firms, num_products=num_products, amt_mean=amt_mean, amt_std=amt_std,
+                include_inventory=include_inventory_penalties, threshold=threshold)
+        predicted_txns[t] = (src[pos], dst[pos], prod[pos], y_amt_pred)
+        
+        # update time-varying states with predicted transactions
+        # note: batch.msg is scaled amounts; batch.amt is raw amounts
+        t_vec = torch.Tensor([t] * pos.sum().int()).long()
+        if MODEL_NAME == 'TGNPL':
+            neighbor_loader.insert(src[pos], dst[pos], prod[pos])
+            model['memory'].update_state(src[pos], dst[pos], prod[pos], t_vec, y_amt_pred)  # batch.msg
+        elif MODEL_NAME == 'GRAPHMIXER':
+            neighbor_loader.insert(src[pos], dst[pos], prod[pos], t_vec, y_amt_pred)  # batch.msg
+        if 'inventory' in model:
+            amt = torch.exp((y_amt_pred.reshape(-1) * amt_std) + amt_mean)  # scale back to batch.amt
+            txns = (src[pos], dst[pos], prod[pos], t_vec, amt)
+            update_inventory_and_compute_loss(None, model, neighbor_loader, data, device, 
+                num_firms=num_firms, num_products=num_products, transactions=txns)  # ignore loss
+            model['inventory'].update_to_new_timestep()
+    return predicted_txns
+        
 
 # ===========================================
 # == Helper functions
@@ -716,6 +857,7 @@ def set_up_data(args, data, dataset):
         if d == 0:  # save so that we can use to scale inventory module caps in get_y_pred 
             AMT_MEAN = mean
             AMT_STD = std
+            print(f"Amount mean = {AMT_MEAN:0.6f}, std = {AMT_STD:0.6f}")
         vals = (vals - mean) / std  # standard scaling
         data.msg[:, d] = vals
         
