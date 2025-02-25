@@ -1,5 +1,5 @@
-# Learning production functions from supply chain networks
-This repo contains code for our paper on learning production functions from supply chain networks (under review). Our code extends code from the [TGB](https://github.com/shenyangHuang/TGB) and [TGB_Baselines](https://github.com/fpour/TGB_Baselines) repositories. 
+# Learning production functions for supply chain networks
+This repo contains code for our [paper](https://arxiv.org/abs/2407.18772), "Learning Production Functions for Supply Chains with Graph Neural Networks", accepted to AAAI 2025, AI for Social Impact Track (oral). Our code extends code from the [TGB](https://github.com/shenyangHuang/TGB) and [TGB_Baselines](https://github.com/fpour/TGB_Baselines) repositories. 
 
 ## Installation
 ```
@@ -69,3 +69,13 @@ python model_experiments.py --train_with_fixed_samples --model graphmixer --ARGS
 ```
 
 To include the inventory module, simply add the flag `--use_inventory`. There are also a number of other optional parameters related to the inventory module. For example, we find that providing initial attention weights via `--att_weights` helps with model training. To run an experiment where the inventory module's attention weights are set to the ground-truth production functions, the functions should be provided via `--prod_graph {PROD_GRAPH_FILE}.pkl`, and use `--fix_inventory` so that the attention weights are not updated during training (see Appendix C.2 and Table 6).
+
+## Citation
+If you use this work, please cite:
+```tex
+@inproceedings{chang2025supplychain,
+  author  = {Serina Chang and Zhiyin Lin and Benjamin Yan and Swapnil Bembde and Qi Xiu and Chi Heem Wong and Yu Qin and Frank Kloster and Alex Luo and Raj Palleti and Jure Leskovec},
+  title   = {Learning Production Functions for Supply Chains with Graph Neural Networks},
+  booktitle = {Proceedings of the 39th Annual AAAI Conference on Artificial Intelligence},
+  year    = {2025},
+}
